@@ -88,7 +88,7 @@ test('HTTP gateway connects to MCP, executes allowed calls and persists administ
   const response = await fetch(state,{headers});
   assert.equal(response.status,200);
   const {audit} = await response.json();
-  assert.deepEqual(audit.map(({kind,status}) => [kind,status]),[
+  assert.deepEqual(audit.filter(event=>event.kind!=='execution').map(({kind,status}) => [kind,status]),[
     ['tool_call','denied'],['policy_update','success'],['tool_call','success'],
   ]);
 
@@ -111,5 +111,22 @@ test('HTTP gateway connects to MCP, executes allowed calls and persists administ
   assert.deepEqual(disabled.tools,[]);
   const persisted = JSON.parse(await readFile(join(dir,'state.json.servers.json'),'utf8'));
   assert.deepEqual(persisted,[{...draft,enabled:false}]);
+
+  const logs = new URL('/admin/audit?q=policy_update&limit=1&offset=0',gateway);
+  const logResult = await fetch(logs,{headers});
+  assert.equal(logResult.status,200);
+  const page = await logResult.json();
+  assert.equal(page.total,1);
+  assert.equal(page.events[0].kind,'policy_update');
+  assert.equal(page.events[0].startedAt,page.events[0].time);
+
+  const settings = new URL('/admin/settings',gateway);
+  const next = {concurrency:1,queueSize:2,queueWaitMs:2500,timeoutMs:1000};
+  const revised = await fetch(settings,{method:'PUT',headers:jsonHeaders,body:JSON.stringify(next)});
+  assert.equal(revised.status,200);
+  assert.deepEqual(await revised.json(),next);
+  const saved = JSON.parse(await readFile(join(dir,'state.json'),'utf8'));
+  assert.deepEqual(saved.execution,next);
+
 
 });

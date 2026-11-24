@@ -8,6 +8,10 @@ export async function GET(req:NextRequest){
     const base=new URL(process.env.GATEWAY_URL??'http://127.0.0.1:3000');
     if(!['http:','https:'].includes(base.protocol)||base.username||base.password)throw Error('Invalid gateway configuration');
     const url=new URL('/admin/catalog',base);
+    for (const key of ['q','limit','offset','tool']) {
+      const value=req.nextUrl.searchParams.get(key);
+      if (value!==null) url.searchParams.set(key,value);
+    }
     const upstream=await fetch(url,{headers:{Authorization:authorization},redirect:'error',cache:'no-store',signal:AbortSignal.timeout(10000)});
     if(!upstream.ok)return NextResponse.json({error:upstream.status===401?'Authentication failed':'Gateway unavailable'},{status:upstream.status===401?401:502});
     const data=await upstream.json();

@@ -12,7 +12,7 @@ const message = z.discriminatedUnion('type',[
 export async function executeIsolated(
   code:string,
   broker:Pick<Broker,'call'>,
-  limits:{timeoutMs?:number;signal?:AbortSignal} = {},
+  limits:{timeoutMs?:number;signal?:AbortSignal;language?:'javascript'|'typescript'} = {},
 ):Promise<unknown> {
   if (Buffer.byteLength(code)>32768) throw Error('Code too large');
   const {signal} = limits;
@@ -21,7 +21,10 @@ export async function executeIsolated(
   return new Promise((resolve,reject) => {
     const child = fork(fileURLToPath(new URL('./sandbox-child.js',import.meta.url)),[],{
       env:{},
-      execArgv:['--max-old-space-size=64','--permission','--allow-fs-read='+fileURLToPath(new URL('../',import.meta.url))],
+      execArgv:[
+        '--max-old-space-size=64','--permission',
+        ...['./','../node_modules/','../package.json'].map(path=>'--allow-fs-read='+fileURLToPath(new URL(path,import.meta.url))),
+      ],
       stdio:['ignore','ignore','ignore','ipc'],
     });
     const controller = new AbortController();
@@ -32,7 +35,7 @@ export async function executeIsolated(
       outcome = {error,value};
       clearTimeout(timer);
       signal?.removeEventListener('abort',cancel);
-      controller.abort();
+      controller.abort(error??undefined);
       child.kill('SIGKILL');
     };
     const cancel = () => finish(Error('Sandbox execution cancelled'));
@@ -66,7 +69,7 @@ export async function executeIsolated(
       };
       void broker.call(item.id,item.args,controller.signal).then(result => reply({result}),() => reply({error:true}));
     });
-    child.send({type:'start',code,timeout}, error => {
+    child.send({type:'start',code,timeout,language:limits.language??'javascript'}, error => {
       if (error) finish(Error('Sandbox IPC failed'));
     });
   });

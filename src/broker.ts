@@ -8,6 +8,9 @@ export class Broker {
   snapshot() { const broker=new Broker();broker.replace([...this.entries.values()]);return broker; }
   add(entry: Entry) { if(this.entries.has(entry.id))throw Error('Duplicate tool');this.entries.set(entry.id,entry); }
   replace(entries:Entry[]){const next=new Map<string,Entry>();for(const e of entries){if(next.has(e.id))throw Error('Duplicate tool');next.set(e.id,e);}this.entries=next;}
+  catalog(allowed:(id:string)=>boolean){
+    return [...this.entries.values()].filter(entry=>allowed(entry.id)).map(({id,name,description,inputSchema})=>({id,name,description,inputSchema}));
+  }
   search(query:string,allowed:(id:string)=>boolean=()=>true){
     const words=query.toLowerCase().split(/\s+/).filter(Boolean);
     return [...this.entries.values()].filter(e=>allowed(e.id)).map(e=>({e,score:words.reduce((n,w)=>n+(e.id.toLowerCase().includes(w)?3:0)+(e.description.toLowerCase().includes(w)?1:0),0)})).filter(x=>!words.length||x.score>0).sort((a,b)=>b.score-a.score||a.e.id.localeCompare(b.e.id)).slice(0,30).map(({e:{id,description}})=>({id,description:description.slice(0,500)}));

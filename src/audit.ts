@@ -5,9 +5,9 @@ export type AuditEvent = {
   requestId: string;
   subject: string;
   id: string;
-  status: 'success' | 'failed' | 'denied' | 'timeout';
+  status: 'success' | 'failed' | 'denied' | 'timeout' | 'cancelled';
   durationMs: number;
-  kind?: 'tool_call' | 'policy_update' | 'server_update' | 'oauth_connect' | 'oauth_disconnect';
+  kind?: 'execution' | 'tool_call' | 'policy_update' | 'server_update' | 'settings_update' | 'oauth_connect' | 'oauth_disconnect';
 };
 
 export class AuditLog {
@@ -51,6 +51,44 @@ export class AuditLog {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(now, event.requestId, event.subject, event.id, event.status, event.durationMs, event.kind ?? 'tool_call');
     this.prune(now);
+  }
+
+  metrics(subject?:string) {
+    const now=Date.now();
+    this.prune(now);
+    const row=this.database.prepare(`
+      SELECT COUNT(*) AS runs,
+             COUNT(CASE WHEN status='success' THEN 1 END) AS successes,
+             AVG(duration_ms) AS averageMs
+      FROM audit WHERE kind='execution' AND event_time>=? AND (? IS NULL OR subject=?)
+    `).get(this.cutoff(now),subject??null,subject??null);
+    return {
+      runs:Number(row?.runs??0),
+      successes:Number(row?.successes??0),
+      averageMs:row?.averageMs===null?null:Number(row?.averageMs??0),
+      retentionDays:this.retentionDays,
+    };
+  }
+
+  page(query:string,limit:number,offset:number) {
+    const now=Date.now();
+    this.prune(now);
+    const filter=`event_time>=? AND (
+      ?='' OR instr(lower(request_id || ' ' || subject || ' ' || tool_id || ' ' || status || ' ' || kind),lower(?))>0
+    )`;
+    const values=[this.cutoff(now),query,query] as const;
+    const count=this.database.prepare(`SELECT COUNT(*) AS total FROM audit WHERE ${filter}`).get(...values);
+    const events=this.database.prepare(`
+      SELECT sequence,event_time,request_id AS requestId,subject,tool_id AS id,status,duration_ms AS durationMs,kind
+      FROM audit WHERE ${filter} ORDER BY sequence DESC LIMIT ? OFFSET ?
+    `).all(...values,limit,offset).map(({event_time,...event})=>({
+      ...event,
+      serverId:event.kind==='tool_call'?String(event.id).split('.',1)[0]||null:
+        (event.kind==='oauth_connect'||event.kind==='oauth_disconnect')?event.id:null,
+      startedAt:new Date(Number(event_time)-Number(event.durationMs)).toISOString(),
+      time:new Date(Number(event_time)).toISOString(),
+    }));
+    return {total:Number(count?.total??0),events,limit,offset};
   }
 
   recent() {

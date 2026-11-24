@@ -1,3 +1,4 @@
+import {setTimeout as delay} from 'node:timers/promises';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {ExecutionQueue} from '../dist/execution-queue.js';
@@ -51,4 +52,18 @@ test('cancelling an execution aborts its pending upstream call and reaps the wor
   controller.abort();
   await stopped.promise;
   await rejected;
+});
+
+test('execution burst remains within configured concurrency while limits change',async()=>{
+  const queue = new ExecutionQueue(2,48,2000);
+  const signal = new AbortController().signal;
+  let current=0;
+  let peak=0;
+  const jobs=Array.from({length:48},(_,i)=>queue.run(signal,async()=>{
+    peak=Math.max(peak,++current);
+    try{await delay(2);return i;}finally{current--;}
+  }));
+  queue.configure(4,32,2000);
+  assert.deepEqual(await Promise.all(jobs),Array.from({length:48},(_,i)=>i));
+  assert.equal(peak,4);
 });

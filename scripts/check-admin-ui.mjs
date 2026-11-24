@@ -75,6 +75,9 @@ try {
   await page.getByRole('button',{name:'Load catalog'}).click();
   await page.getByText('inventory.count',{exact:true}).waitFor();
   assert.equal(await page.getByLabel('Access token').inputValue(),'');
+  await page.getByRole('button',{name:'inventory.count',exact:true}).click();
+  await page.getByRole('dialog').getByText('JSON Schema',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'閉じる',exact:true}).click();
   if (screenshots) {
     await mkdir(screenshots,{recursive:true});
     await page.screenshot({path:join(screenshots,'admin-dashboard.png'),fullPage:true});
@@ -116,6 +119,12 @@ try {
   await page.getByText('success',{exact:true}).waitFor();
   await page.getByLabel('Administrator access token').blur();
   if (screenshots) await page.screenshot({path:join(screenshots,'admin-policy-audit.png'),fullPage:true});
+  await page.goto(admin+'/benchmarks');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'比較を計算'}).click();
+  await page.getByRole('heading',{name:'合成ツールカタログ'}).waitFor();
+  await page.getByRole('heading',{name:/実カタログ/}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-benchmarks.png'),fullPage:true});
   await page.goto(admin+'/servers');
   await page.getByLabel('Administrator access token').fill(token);
   await page.getByRole('button',{name:'保存済み設定を読み込む'}).click();
@@ -126,6 +135,15 @@ try {
   await page.getByRole('checkbox',{name:'有効',exact:true}).uncheck();
   await page.getByRole('button',{name:'保存',exact:true}).click();
   await page.getByText('接続設定を保存しました。',{exact:true}).waitFor();
+  await page.goto(admin+'/settings');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'実行設定を読み込む'}).click();
+  await page.getByRole('spinbutton',{name:'Maximum concurrent executions'}).fill('2');
+  await page.getByRole('button',{name:'保存',exact:true}).click();
+  await page.getByText('実行設定を保存しました。',{exact:true}).waitFor();
+  const settings = await fetch(base+'/admin/settings',{headers:{Authorization:'Bearer '+token}});
+  assert.equal((await settings.json()).concurrency,2);
+
   const registry = await fetch(base+'/admin/upstreams',{headers:{Authorization:'Bearer '+token}});
   assert.equal((await registry.json())[0].enabled,false);
   assert.deepEqual(pageErrors,[]);

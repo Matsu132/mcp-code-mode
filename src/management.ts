@@ -2,6 +2,7 @@ import {readFile,rename,rm,writeFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import {AuditLog,type AuditEvent} from './audit.js';
+import {executionSettings} from './execution-settings.js';
 import {RolePolicy,customRole,roleAssignment} from './roles.js';
 
 const rule = z.object({subject:z.string().min(1).max(300),allow:z.array(z.string().max(300)).max(1000)}).strict();
@@ -9,6 +10,7 @@ const policy = z.object({
   rules:z.array(rule).max(1000),
   roles:z.array(customRole).max(100),
   assignments:z.array(roleAssignment).max(1000),
+  execution:executionSettings.optional(),
 }).strict();
 const savedPolicy = policy.extend({roles:policy.shape.roles.default([]),assignments:policy.shape.assignments.default([])});
 const updatePolicy = policy.partial().refine(value => Object.values(value).some(v => v !== undefined));
@@ -46,6 +48,12 @@ export class Management {
   view() {
     return {...this.state,audit:this.audit.recent()};
   }
+
+  get execution() { return this.state.execution; }
+
+  metrics(subject?:string) { return this.audit.metrics(subject); }
+
+  events(query:string,limit:number,offset:number) { return this.audit.page(query,limit,offset); }
 
   async update(raw:unknown) {
     if (this.writing) throw Error('Concurrent update');

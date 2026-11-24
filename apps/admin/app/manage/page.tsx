@@ -2,7 +2,7 @@
 
 import {useState} from 'react';
 import {
-  Alert,Box,Button,Checkbox,Dialog,DialogActions,DialogTitle,FormControlLabel,
+  Alert,Box,Button,Checkbox,Dialog,DialogActions,DialogTitle,FormControlLabel,LinearProgress,
   Paper,Snackbar,Stack,Table,TableBody,TableCell,TableHead,TablePagination,
   TableRow,TextField,Typography,
 } from '@mui/material';
@@ -10,13 +10,13 @@ import {
 type Rule = {subject:string;allow:string[]};
 type Role = {id:string;read:boolean;execute:boolean;manage:boolean;servers:string[];tools:string[]};
 type Assignment = {subject:string;role:string;disabled:boolean};
-type Audit = {requestId:string;time:string;subject:string;id:string;status:string;durationMs:number;kind:string};
-type State = {rules:Rule[];roles:Role[];assignments:Assignment[];audit:Audit[]};
+type Audit = {sequence:number;requestId:string;startedAt:string;time:string;subject:string;serverId:string|null;id:string;status:string;durationMs:number;kind:string};
+type State = {rules:Rule[];roles:Role[];assignments:Assignment[]};
 
 const builtins = ['admin','operator','viewer'];
 const split = (value:string) => value.split(',');
 const clean = (values:string[]) => [...new Set(values.map(value=>value.trim()).filter(Boolean))];
-const blank:State = {rules:[],roles:[],assignments:[],audit:[]};
+const blank:State = {rules:[],roles:[],assignments:[]};
 
 function replace<T>(items:T[], index:number, patch:Partial<T>) {
   return items.map((item,i) => i === index ? {...item,...patch} : item);
@@ -32,13 +32,29 @@ export default function Manage() {
   const [remove,setRemove] = useState<{section:'rules'|'roles'|'assignments';index:number}|null>(null);
   const [auditQuery,setAuditQuery] = useState('');
   const [page,setPage] = useState(0);
+  const [audit,setAudit] = useState<Audit[]>([]);
+  const [auditCount,setAuditCount] = useState(0);
+  const [auditBusy,setAuditBusy] = useState(false);
+  const [appliedQuery,setAppliedQuery] = useState('');
   const roles = [...builtins,...data.roles.map(role=>role.id).filter(Boolean)];
   const pageSize = 15;
-  const events = data.audit.filter(event =>
-    [event.subject,event.id,event.status,event.kind,event.requestId].some(value =>
-      value.toLowerCase().includes(auditQuery.trim().toLowerCase()),
-    ),
-  );
+  async function auditPage(index:number,query:string) {
+    setAuditBusy(true);
+    try {
+      const params=new URLSearchParams({q:query,offset:String(index*pageSize),limit:String(pageSize)});
+      const res=await fetch('/api/audit?'+params,{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+      if (!res.ok) throw Error('監査ログを取得できませんでした。');
+      const data=await res.json() as {total:number;events:Audit[]};
+      setAudit(data.events);
+      setAuditCount(data.total);
+      setPage(index);
+      setAppliedQuery(query);
+    }catch{
+      setError('監査ログを取得できませんでした。');
+    }finally{
+      setAuditBusy(false);
+    }
+  }
 
   async function request(save = false) {
     setBusy(true);
@@ -61,7 +77,8 @@ export default function Manage() {
       if (!res.ok) throw Error('管理者認証または更新に失敗しました。重複する Subject とロールIDも確認してください。');
       setData(await res.json() as State);
       setLoaded(true);
-      setPage(0);
+      setAuditQuery('');
+      await auditPage(0,'');
       if (save) setSaved(true);
     } catch (err) {
       setError(err instanceof Error?err.message:'更新に失敗しました。');
@@ -76,7 +93,7 @@ export default function Manage() {
         <Typography variant="h4">権限管理・監査ログ</Typography>
         <Button href="/">Dashboard</Button>
         <TextField label="Administrator access token" type="password" autoComplete="off" value={token}
-          disabled={busy} onChange={e=>{setToken(e.target.value);setLoaded(false);setData(blank);setError('');}}/>
+          disabled={busy||auditBusy} onChange={e=>{setToken(e.target.value);setLoaded(false);setData(blank);setAudit([]);setAuditCount(0);setError('');}}/>
         <Button disabled={!token||busy} onClick={()=>void request()}>読み込み</Button>
         {error && <Alert severity="error">{error}</Alert>}
         {loaded && <>
@@ -126,19 +143,28 @@ export default function Manage() {
               <Button variant="contained" disabled={busy} onClick={()=>void request(true)}>保存</Button>
             </Stack>
           </Paper>
-          <Paper sx={{p:2,overflowX:'auto'}}>
-            <Typography variant="h6" gutterBottom>直近の監査ログ</Typography>
-            <TextField label="監査ログを検索" size="small" value={auditQuery} onChange={e=>{setAuditQuery(e.target.value);setPage(0);}}/>
+          <Paper id="execution-logs" sx={{p:2,overflowX:'auto'}}>
+            <Typography variant="h6" gutterBottom>実行履歴・監査ログ</Typography>
+            <Stack component="form" direction="row" spacing={2} sx={{mb:2}}
+              onSubmit={event=>{event.preventDefault();if(!auditBusy&&!busy){setError('');void auditPage(0,auditQuery);}}}>
+              <TextField label="監査ログを検索" size="small" value={auditQuery} onChange={e=>setAuditQuery(e.target.value)} slotProps={{htmlInput:{maxLength:200}}}/>
+              <Button type="submit" disabled={auditBusy||busy}>検索</Button>
+            </Stack>
+            {auditBusy&&<LinearProgress aria-label="監査ログを読み込み中"/>}
             <Table size="small" aria-label="監査ログ">
-              <TableHead><TableRow>{['Time','Subject','Tool','Event','Status','ms'].map(label=><TableCell key={label}>{label}</TableCell>)}</TableRow></TableHead>
+              <TableHead>
+                <TableRow>{['End','Start','Request','Subject','Server','Tool','Event','Status','ms'].map(label=><TableCell key={label}>{label}</TableCell>)}</TableRow>
+              </TableHead>
               <TableBody>
-                {events.slice(page*pageSize,(page+1)*pageSize).map((event,index)=><TableRow key={event.requestId+index}>
-                  {[event.time,event.subject,event.id,event.kind,event.status,event.durationMs].map((value,i)=><TableCell key={i}>{value}</TableCell>)}
+                {audit.map(event=><TableRow key={event.sequence}>
+                  {[event.time,event.startedAt,event.requestId,event.subject,event.serverId,event.id,event.kind,event.status,event.durationMs]
+                    .map((value,i)=><TableCell key={i}>{value??'—'}</TableCell>)}
                 </TableRow>)}
-                {!events.length && <TableRow><TableCell colSpan={6}>表示できる監査ログがありません。</TableCell></TableRow>}
+                {!audit.length && <TableRow><TableCell colSpan={9}>表示できる監査ログがありません。</TableCell></TableRow>}
               </TableBody>
             </Table>
-            <TablePagination component="div" count={events.length} rowsPerPage={pageSize} rowsPerPageOptions={[pageSize]} page={page} onPageChange={(_,next)=>setPage(next)}/>
+            <TablePagination component="div" count={auditCount} rowsPerPage={pageSize} rowsPerPageOptions={[pageSize]} page={page}
+              onPageChange={(_,next)=>{if(!auditBusy&&!busy){setError('');void auditPage(next,appliedQuery);}}}/>
           </Paper>
         </>}
       </Stack>

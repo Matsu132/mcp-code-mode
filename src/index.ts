@@ -3,13 +3,14 @@ import {randomUUID} from 'node:crypto';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {z} from 'zod';
+import {catalogBenchmark,syntheticBenchmark} from './benchmark.js';
 import {Broker} from './broker.js';
 import {Upstreams} from './upstreams.js';
 import {DelegatedOAuth} from './upstream-oauth.js';
+import {defaults,executionSettings} from './execution-settings.js';
 import {ExecutionQueue} from './execution-queue.js';
 import {executeIsolated as execute} from './isolated.js';
 import {Management} from './management.js';
-import {transpile} from './types.js';
 import {createAuth,permitted,type Principal} from './auth.js';
 import {adminPage} from './admin.js';
 const auth=createAuth(process.env);
@@ -22,11 +23,8 @@ await upstreams.refresh();
 const interval=setInterval(()=>void upstreams.refresh().catch(()=>console.error(JSON.stringify({event:'refresh_failed'}))),60000);
 interval.unref();
 const wrap=(v:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(v)}]});
-const executionQueue=new ExecutionQueue(
-  z.coerce.number().int().min(1).max(16).parse(process.env.EXECUTION_CONCURRENCY??4),
-  z.coerce.number().int().min(0).max(128).parse(process.env.EXECUTION_QUEUE_SIZE??8),
-  z.coerce.number().int().min(100).max(15000).parse(process.env.EXECUTION_QUEUE_WAIT_MS??5000),
-);
+let limits=management.execution??defaults(process.env);
+const executionQueue=new ExecutionQueue(limits.concurrency,limits.queueSize,limits.queueWaitMs);
 const delegatedConnections=new ExecutionQueue(16,32,3000);
 const exactId=z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
 const oauthCommand=z.discriminatedUnion('action',[
@@ -62,12 +60,16 @@ const http=createServer(async(req,res)=>{
   if(req.headers.origin&&req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
   if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
   if(req.url==='/admin'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"}).end(adminPage);return;}
-  const path=req.url??'';
+  const [path,query='']=(req.url??'').split('?',2);
+  const params=new URLSearchParams(query);
   const method=req.method??'';
   const methods:Record<string,string[]> = {
     '/mcp':['POST'],
     '/admin/catalog':['GET'],
     '/admin/state':['GET','PUT'],
+    '/admin/audit':['GET'],
+    '/admin/settings':['GET','PUT'],
+    '/admin/benchmarks':['GET'],
     '/admin/upstreams':['GET','PUT'],
     '/admin/upstreams/test':['POST'],
     '/admin/upstreams/refresh':['POST'],
@@ -75,6 +77,7 @@ const http=createServer(async(req,res)=>{
     '/oauth/callback':['POST'],
   };
   if(!Object.hasOwn(methods,path)||!methods[path].includes(method)){res.writeHead(405).end();return;}
+  const pagination=z.object({q:z.string().max(200).default(''),offset:z.coerce.number().int().min(0).max(1000000).default(0),limit:z.coerce.number().int().min(1).max(100).default(50)});
   const json=(data:unknown)=>res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(data));
   if(active>=32){res.writeHead(429).end();return;}active++;
   let server:McpServer|undefined;
@@ -118,9 +121,48 @@ const http=createServer(async(req,res)=>{
       for(const user of users)for(const entry of user?.entries??[])if(delegatedAvailable(entry.id))catalog.add(entry);
       return catalog;
     };
+    const describe=async(id:string)=>{
+      if(!permittedTool(id))throw Error('Unknown or denied tool');
+      const [upstreamId]=id.split('.',1);
+      if(!delegated?.reserves(upstreamId))return broker.describe(id);
+      const session=await openSession(upstreamId);
+      if(!delegatedAvailable(id)||!permittedTool(id))throw Error('Unknown or denied tool');
+      const temporary=new Broker();
+      temporary.replace(session?.entries??[]);
+      return temporary.describe(id);
+    };
     if(path.startsWith('/admin/')&&path!=='/admin/catalog'&&!can(principal,'manage')){res.writeHead(403).end();return;}
-    if(req.url==='/admin/state'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(management.view()));return;}
-    if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:(await requestCatalog()).search('',id=>permittedTool(id))}));return;}
+    if(path==='/admin/state'&&method==='GET'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(management.view()));return;}
+    if(path==='/admin/audit'){
+      const {q,limit,offset}=pagination.parse(Object.fromEntries(params));
+      json(management.events(q,limit,offset));return;
+    }
+    if(path==='/admin/settings'&&method==='GET'){json(limits);return;}
+    if(path==='/admin/benchmarks'){
+      const entries=(await requestCatalog()).catalog(id=>permittedTool(id)).map(({id,description,inputSchema})=>({
+        name:id,description,inputSchema,
+      }));
+      json({synthetic:syntheticBenchmark(),catalog:catalogBenchmark(entries),latency:management.metrics(principal.id)});
+      return;
+    }
+    if(path==='/admin/catalog'){
+      const id=params.get('tool');
+      if(id!==null){json(await describe(z.string().min(1).max(300).parse(id)));return;}
+      const {q,limit,offset}=pagination.parse(Object.fromEntries(params));
+      const entries=(await requestCatalog()).catalog(id=>permittedTool(id));
+      const term=q.trim().toLowerCase();
+      const matching=entries.filter(entry=>(entry.id+' '+entry.description).toLowerCase().includes(term));
+      matching.sort((a,b)=>a.id.localeCompare(b.id));
+      json({
+        subject:principal.id,
+        tools:matching.slice(offset,offset+limit).map(({id,description})=>({id,description:description.slice(0,500)})),
+        total:matching.length,
+        visibleTools:entries.length,
+        visibleServers:new Set(entries.map(entry=>entry.id.split('.',1)[0])).size,
+        executions:management.metrics(can(principal,'manage')?undefined:principal.id),
+      });
+      return;
+    }
     if(path==='/admin/upstreams'&&method==='GET'){json(upstreams.view());return;}
     if(path==='/admin/upstreams/refresh'){await upstreams.refresh();json(upstreams.view());return;}
     if(path==='/oauth/connections'&&method==='GET'){
@@ -131,8 +173,17 @@ const http=createServer(async(req,res)=>{
     }
     const body=await readBody(req);
     if(body===undefined){res.writeHead(413).end();return;}
+    if(path==='/admin/settings'){
+      const updated=executionSettings.parse(body);
+      await management.update({execution:updated});
+      limits=updated;
+      executionQueue.configure(updated.concurrency,updated.queueSize,updated.queueWaitMs);
+      management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:0,kind:'settings_update'});
+      json(limits);return;
+    }
     if(path==='/admin/state'){
-      await management.update(body);
+      const settings=z.strictObject({rules:z.unknown().optional(),roles:z.unknown().optional(),assignments:z.unknown().optional()}).parse(body);
+      await management.update(settings);
       management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:0,kind:'policy_update'});
       json(management.view());return;
     }
@@ -156,23 +207,16 @@ const http=createServer(async(req,res)=>{
     server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap((await requestCatalog()).search(query,id=>permittedTool(id))));
-    server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{
-      if(!permittedTool(id))throw Error('Unknown or denied tool');
-      const [upstreamId]=id.split('.',1);
-      if(!delegated?.reserves(upstreamId))return wrap(broker.describe(id));
-      const session=await openSession(upstreamId);
-      if(!delegatedAvailable(id)||!permittedTool(id))throw Error('Unknown or denied tool');
-      const temporary=new Broker();
-      temporary.replace(session?.entries??[]);
-      return wrap(temporary.describe(id));
-    });
+    server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>wrap(await describe(id)));
     server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language},{signal:requestSignal})=>{
+      const started=Date.now();
       if(!can(principal,'execute')){
-        management.record({requestId,subject:principal.id,id:'',status:'denied',durationMs:0});
+        management.record({requestId,subject:principal.id,id:'',status:'denied',durationMs:0,kind:'execution'});
         throw Error('Execution denied');
       }
       const executionSignal=AbortSignal.any([requestSignal,connection.signal]);
-      return wrap(await executionQueue.run(executionSignal,()=>execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{
+      try {
+        const result=await executionQueue.run(executionSignal,()=>execute(code,{call:async(id,args,signal)=>{
         if(!permittedTool(id,'execute')){
           management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});
           throw Error('Unknown or denied tool');
@@ -188,14 +232,24 @@ const http=createServer(async(req,res)=>{
             target.replace(session?.entries??[]);
           }
           const result=await target.call(id,args,signal);
-          management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});
+          const status=(JSON.parse(result) as {isError?:boolean}).isError?'failed':'success';
+          management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
           return result;
         }catch(error){
-          const status=signal.aborted?'timeout':'failed';
+          const status=signal.aborted
+            ? (signal.reason instanceof Error&&signal.reason.message.includes('deadline')?'timeout':'cancelled')
+            : 'failed';
           management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
           throw error;
         }
-      }},{signal:executionSignal})));
+        }},{signal:executionSignal,timeoutMs:limits.timeoutMs,language}));
+        management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:Date.now()-started,kind:'execution'});
+        return wrap(result);
+      } catch (error) {
+        const status=executionSignal.aborted?'cancelled':error instanceof Error&&error.message.includes('deadline')?'timeout':'failed';
+        management.record({requestId,subject:principal.id,id:'',status,durationMs:Date.now()-started,kind:'execution'});
+        throw error;
+      }
     });
     await server.connect(transport);await transport.handleRequest(req,res,body);
   }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}

@@ -45,18 +45,43 @@ const http=createServer(async(req,res)=>{
   try{
     const principal=await auth.authenticate(req.headers.authorization??'');
     if(!principal){const challenge=auth.metadata?'Bearer resource_metadata="'+new URL('/.well-known/oauth-protected-resource/mcp',auth.metadata.resource).href+'"':'Bearer';res.writeHead(401,{'WWW-Authenticate':challenge}).end();return;}
-    const allowed=(id:string)=>permitted(principal,id)&&management.allowed(principal.id,id);
-    if(req.url==='/admin/state'&&!principal.admin){res.writeHead(403).end();return;}
+    const bootstrapAdmin=principal.admin===true;
+    const roles=()=>management.roles;
+    if(roles().disabled(principal.id,bootstrapAdmin)){res.writeHead(403).end();return;}
+    const can=(operation:'read'|'execute'|'manage',id?:string)=>roles().permits(principal.id,bootstrapAdmin,operation,id);
+    const allowed=(id:string,operation:'read'|'execute'='read')=>can(operation,id)&&permitted(principal,id)&&management.allowed(principal.id,id);
+    if(req.url==='/admin/state'&&!can('manage')){res.writeHead(403).end();return;}
     if(req.url==='/admin/state'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(management.view()));return;}
-    if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:broker.search('',allowed)}));return;}
+    if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:broker.search('',id=>allowed(id))}));return;}
     const chunks:Buffer[]=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>65536){res.writeHead(413).end();return;}chunks.push(chunk);}
     if(req.url==='/admin/state'){await management.update(JSON.parse(Buffer.concat(chunks).toString()));management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:0,kind:'policy_update'});res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(management.view()));return;}
     server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
-    server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,allowed)));
+    server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,id=>allowed(id))));
     server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{if(!allowed(id))throw Error('Unknown or denied tool');return wrap(broker.describe(id));});
-    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id)){management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});throw Error('Unknown or denied tool');}const start=Date.now();try{const result=await broker.call(id,args,signal);management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});return result;}catch(e){management.record({requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start});throw e;}}})));
+    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>{
+      if(!can('execute')){
+        management.record({requestId,subject:principal.id,id:'',status:'denied',durationMs:0});
+        throw Error('Execution denied');
+      }
+      return wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{
+        if(!allowed(id,'execute')){
+          management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});
+          throw Error('Unknown or denied tool');
+        }
+        const start=Date.now();
+        try{
+          const result=await broker.call(id,args,signal);
+          management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});
+          return result;
+        }catch(error){
+          const status=signal.aborted?'timeout':'failed';
+          management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
+          throw error;
+        }
+      }}));
+    });
     await server.connect(transport);await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
   }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}
   finally{active--;await server?.close();}

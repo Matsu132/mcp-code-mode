@@ -70,8 +70,7 @@ try {
   await page.goto(admin);
   await page.getByLabel('Access token').fill('invalid-token');
   await page.getByRole('button',{name:'Load catalog'}).click();
-  await page.getByRole('alert').waitFor();
-  assert.match(await page.getByRole('alert').innerText(),/Authentication|denied|failed|invalid/i);
+  await page.getByRole('alert').filter({hasText:'Authentication failed'}).waitFor();
   await page.getByLabel('Access token').fill(token);
   await page.getByRole('button',{name:'Load catalog'}).click();
   await page.getByText('inventory.count',{exact:true}).waitFor();
@@ -90,6 +89,14 @@ try {
   await page.getByRole('link',{name:'管理',exact:true}).click();
   await page.getByLabel('Administrator access token').fill(token);
   await page.getByRole('button',{name:'読み込み'}).click();
+  await page.getByRole('button',{name:'ロールを追加',exact:true}).click();
+  await page.getByLabel('Role ID',{exact:true}).fill('fixture-reader');
+  await page.getByLabel('Allowed server IDs',{exact:true}).fill('inventory');
+  await page.getByLabel('Role tool IDs',{exact:true}).fill('inventory.count');
+  await page.getByRole('button',{name:'ユーザーを追加',exact:true}).click();
+  await page.getByLabel('User subject',{exact:true}).fill('fixture-viewer');
+  await page.getByRole('combobox',{name:'Role',exact:true}).click();
+  await page.getByRole('option',{name:'fixture-reader',exact:true}).click();
   await page.getByRole('button',{name:'追加',exact:true}).click();
   await page.getByLabel('Subject',{exact:true}).fill('fixture-viewer');
   await page.getByLabel('Allowed tool IDs (comma separated)').fill('inventory.count');
@@ -104,6 +111,8 @@ try {
   const subject = page.getByLabel('Subject',{exact:true});
   await subject.waitFor();
   assert.equal(await subject.inputValue(),'fixture-viewer');
+  assert.equal(await page.getByLabel('Role ID',{exact:true}).inputValue(),'fixture-reader');
+  assert.equal(await page.getByLabel('User subject',{exact:true}).inputValue(),'fixture-viewer');
   await page.getByText('success',{exact:true}).waitFor();
   await page.getByLabel('Administrator access token').blur();
   if (screenshots) await page.screenshot({path:join(screenshots,'admin-policy-audit.png'),fullPage:true});

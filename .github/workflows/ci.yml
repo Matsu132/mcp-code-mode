@@ -11,11 +11,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
       - run: npm audit --audit-level=high
+      - run: docker build -t mcp-code-mode .
   admin:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -27,7 +28,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run build
       - run: npm audit --audit-level=high
+      - run: docker build -t mcp-code-mode-admin .

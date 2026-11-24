@@ -3,14 +3,16 @@ import {createRemoteJWKSet,customFetch,jwtVerify} from 'jose';
 import {z} from 'zod';
 export type Principal={id:string;allow:string[];admin?:boolean};
 const settings=z.object({issuer:z.string().url(),jwks:z.string().url(),resource:z.string().url(),users:z.array(z.object({sub:z.string(),allow:z.array(z.string())}))});
-export function createAuth(env:NodeJS.ProcessEnv){
+export function createAuth(env:NodeJS.ProcessEnv,enrollment?:(subject:string)=>string[]|undefined){
   const oauth=env.OAUTH_CONFIG?settings.parse(JSON.parse(env.OAUTH_CONFIG)):undefined;
   if(oauth){
     for(const u of [oauth.issuer,oauth.jwks,oauth.resource])if(new URL(u).protocol!=='https:')throw Error('OAuth URLs must use HTTPS');
     const keys=createRemoteJWKSet(new URL(oauth.jwks),{[customFetch]:(url,init)=>fetch(url,{...init,redirect:'error'})});
     const principalFor=(subject:string):Principal|null=>{
       const user=oauth.users.find(u=>u.sub===subject);
-      return user?{id:user.sub,allow:user.allow,admin:(env.ADMIN_SUBJECTS??'').split(',').includes(user.sub)}:null;
+      if(user)return {id:user.sub,allow:user.allow,admin:(env.ADMIN_SUBJECTS??'').split(',').includes(user.sub)};
+      const allow=enrollment?.(subject);
+      return allow?{id:subject,allow}:null;
     };
     return {principalFor,metadata:{resource:oauth.resource,authorization_servers:[oauth.issuer],bearer_methods_supported:['header']},async authenticate(header:string):Promise<Principal|null>{
       if(!header.startsWith('Bearer '))return null;

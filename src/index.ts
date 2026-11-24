@@ -13,9 +13,9 @@ import {executeIsolated as execute} from './isolated.js';
 import {Management} from './management.js';
 import {createAuth,permitted,type Principal} from './auth.js';
 import {adminPage} from './admin.js';
-const auth=createAuth(process.env);
 const statePath=process.env.STATE_PATH??'state.json';
 const management=await Management.open(statePath);
+const auth=createAuth(process.env,subject=>management.roles.enrollment(subject));
 const broker=new Broker();
 const delegated=DelegatedOAuth.fromEnvironment(process.env,statePath);
 const upstreams=await Upstreams.open(process.env.CONFIG_PATH??'config.json',process.env.UPSTREAMS_PATH??statePath+'.servers.json',broker,delegated);
@@ -52,12 +52,14 @@ async function readBody(req:AsyncIterable<Buffer>) {
   }
   return JSON.parse(Buffer.concat(chunks).toString()) as unknown;
 }
+const allowedHost=process.env.ALLOWED_HOST??'127.0.0.1:'+String(process.env.PORT??3000);
+const allowedHosts=new Set([allowedHost,...(process.env.ADDITIONAL_ALLOWED_HOSTS??'').split(',').map(host=>host.trim()).filter(Boolean)]);
 let active=0;
 const http=createServer(async(req,res)=>{
   const requestId=randomUUID();
-  const allowedHost=process.env.ALLOWED_HOST??'127.0.0.1:'+String(process.env.PORT??3000);
-  if(req.headers.host!==allowedHost){res.writeHead(403).end();return;}
+  if(!req.headers.host||!allowedHosts.has(req.headers.host)){res.writeHead(403).end();return;}
   if(req.headers.origin&&req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
+  if(req.method==='GET'&&req.url==='/health'){res.writeHead(204,{'Cache-Control':'no-store'}).end();return;}
   if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
   if(req.url==='/admin'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"}).end(adminPage);return;}
   const [path,query='']=(req.url??'').split('?',2);

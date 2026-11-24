@@ -9,7 +9,7 @@ import {
 
 type Rule = {subject:string;allow:string[]};
 type Role = {id:string;read:boolean;execute:boolean;manage:boolean;servers:string[];tools:string[]};
-type Assignment = {subject:string;role:string;disabled:boolean};
+type Assignment = {subject:string;role:string;disabled:boolean;enrollmentAllow?:string[]};
 type Audit = {sequence:number;requestId:string;startedAt:string;time:string;subject:string;serverId:string|null;id:string;status:string;durationMs:number;kind:string};
 type State = {rules:Rule[];roles:Role[];assignments:Assignment[]};
 
@@ -63,7 +63,10 @@ export default function Manage() {
       const payload = {
         rules:data.rules.map(rule=>({subject:rule.subject.trim(),allow:clean(rule.allow)})),
         roles:data.roles.map(role=>({...role,id:role.id.trim(),servers:clean(role.servers),tools:clean(role.tools)})),
-        assignments:data.assignments.map(assignment=>({...assignment,subject:assignment.subject.trim()})),
+        assignments:data.assignments.map(assignment=>({
+          ...assignment,subject:assignment.subject.trim(),
+          enrollmentAllow:assignment.enrollmentAllow===undefined?undefined:clean(assignment.enrollmentAllow),
+        })),
       };
       if (save && (payload.rules.some(rule=>!rule.subject) || payload.roles.some(role=>!/^[a-z][a-z0-9_-]{0,63}$/.test(role.id)) ||
         payload.assignments.some(assignment=>!assignment.subject || !roles.includes(assignment.role)))) {
@@ -100,8 +103,9 @@ export default function Manage() {
           <Paper sx={{p:2}}>
             <Stack spacing={2}>
               <Typography variant="h6">ユーザーとロール</Typography>
-              <Alert severity="info">外部認証設定で許可された Subject にロールを割り当てます。管理権限を持つユーザーは、この画面で他のユーザーとロールを編集できます。</Alert>
-              {data.assignments.map((assignment,i)=><Stack key={i} spacing={1} direction={{xs:'column',sm:'row'}}>
+              <Alert severity="info">信頼済み発行元の Subject を登録し、ロールを割り当てます。環境変数に登録済みのユーザーには、元のツール許可リストも適用されます。</Alert>
+              {data.assignments.map((assignment,i)=><Paper key={i} variant="outlined" sx={{p:2}}><Stack spacing={1}>
+                <Stack spacing={1} direction={{xs:'column',sm:'row'}}>
                 <TextField label="User subject" value={assignment.subject} disabled={busy}
                   onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{subject:e.target.value})}))}/>
                 <TextField select slotProps={{select:{native:true}}} label="Role" value={roles.includes(assignment.role)?assignment.role:''} disabled={busy}
@@ -111,7 +115,13 @@ export default function Manage() {
                 <FormControlLabel label="無効" control={<Checkbox checked={assignment.disabled} disabled={busy}
                   onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{disabled:e.target.checked})}))}/>}/>
                 <Button color="error" disabled={busy} onClick={()=>setRemove({section:'assignments',index:i})}>削除</Button>
-              </Stack>)}
+                </Stack>
+                <FormControlLabel label="ユーザーをGatewayに登録" control={<Checkbox checked={assignment.enrollmentAllow!==undefined} disabled={busy}
+                  onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{enrollmentAllow:e.target.checked?[]:undefined})}))}/>}/>
+                {assignment.enrollmentAllow!==undefined&&<TextField label="Enrollment tool IDs" value={assignment.enrollmentAllow.join(',')}
+                  helperText="この画面で新規登録したSubjectに許可するツールIDをカンマで区切ります。"
+                  disabled={busy} onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{enrollmentAllow:split(e.target.value)})}))}/>}
+              </Stack></Paper>)}
               <Button disabled={busy} onClick={()=>setData(old=>({...old,assignments:[...old.assignments,{subject:'',role:'viewer',disabled:false}]}))}>ユーザーを追加</Button>
               <Typography variant="h6">カスタムロール</Typography>
               {data.roles.map((role,i)=><Paper key={i} variant="outlined" sx={{p:2}}>

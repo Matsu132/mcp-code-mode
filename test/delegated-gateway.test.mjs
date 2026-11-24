@@ -122,4 +122,12 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
   assert.equal((await send('/oauth/connections',alice,{action:'disconnect',id:'private'})).status,200);
   assert.deepEqual(await search(callAlice),[]);
   assert.deepEqual(await search(callBob),['private.bob_read']);
+  const enrolled={subject:'unknown',role:'viewer',disabled:false,enrollmentAllow:['private.alice_read']};
+  assert.equal((await send('/admin/state',admin,{assignments:[enrolled]},'PUT')).status,200);
+  assert.equal((await get('/admin/catalog',unknown)).status,200);
+  assert.equal((await get('/admin/state',unknown)).status,403);
+  assert.equal((await send('/admin/state',admin,{assignments:[{...enrolled,disabled:true}]},'PUT')).status,200);
+  assert.equal((await get('/admin/catalog',unknown)).status,403);
+  assert.equal((await send('/admin/state',admin,{assignments:[]},'PUT')).status,200);
+  assert.equal((await get('/admin/catalog',unknown)).status,401);
 });

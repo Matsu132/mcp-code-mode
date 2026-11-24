@@ -16,6 +16,7 @@ export const roleAssignment = z.object({
   subject:z.string().min(1).max(300),
   role:roleId,
   disabled:z.boolean(),
+  enrollmentAllow:z.array(toolId).max(1000).optional(),
 }).strict();
 
 type Role = z.infer<typeof customRole>;
@@ -57,6 +58,10 @@ export class RolePolicy {
     const server = tool.split('.',1)[0];
     return (role.servers.includes('*') || role.servers.includes(server))
       && (role.tools.includes('*') || role.tools.includes(tool));
+  }
+
+  enrollment(subject:string) {
+    return this.assignments.get(subject)?.enrollmentAllow;
   }
 
   disabled(subject:string, bootstrapAdmin:boolean) {

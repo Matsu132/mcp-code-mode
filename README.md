@@ -39,10 +39,7 @@ Export a randomly generated `GATEWAY_TOKEN` of at least 32 characters and run
 named environment variable into the Gateway service using a private Compose override.
 
 Connect MCP clients to `http://127.0.0.1:3000/mcp` and open the admin UI at
-`http://127.0.0.1:3001`. Both ports are published on loopback. The containers
-share a network namespace so the admin proxy can use the same Host allowlist
-as the local MCP client. The Gateway persists policies and audit entries in
-the `state` volume. Use Docker Engine on Linux for this configuration.
+`http://127.0.0.1:3001`. Both ports are published on loopback. The admin proxy connects through the private Compose network using the explicitly allowed `gateway:3000` Host. The Gateway persists server settings, policies, audit events and OAuth grants in the `state` volume. Use Docker Engine on Linux for this configuration.
 
 ## OAuth resource server
 Alternatively set OAUTH_CONFIG to JSON with issuer, jwks, resource (exact HTTPS MCP URL), and users array of {sub,allow:["demo.list_items"]}. Use an external OAuth authorization server that supports MCP resource audiences and PKCE. JWT verification supports RS256 and ES256, validates issuer, audience, expiry and subject, and exposes protected resource metadata. Unknown subjects are denied. Never pass incoming tokens upstream. This config establishes the identity used for per-user upstream delegation.
@@ -83,7 +80,7 @@ Set ADMIN_SUBJECTS to a comma-separated list of trusted OAuth subject IDs (stati
 
 ### Roles
 
-Gateway authentication and the external OAuth subject allowlist remain required.
+Gateway authenticates subjects using the configured OAuth issuer. Administrators can enroll subjects in the UI, which requires an explicit tool allowlist, or manage assignments for subjects in the environment configuration. Only the configured issuer can authenticate either type of subject.
 The built-in Viewer role reads the catalog. Operator also executes tools.
 Admin also manages policy. Custom roles select read, execute and manage
 capabilities, with server and tool allowlists intersected with the existing
@@ -126,7 +123,7 @@ Use the network firewall to restrict egress for operator-trusted endpoints.
 ### Connecting users to upstream OAuth
 
 1. Configure Gateway authentication with `OAUTH_CONFIG` and enroll the user
-   subjects. The static bearer token represents a single administrator identity.
+   subjects in that config or in the administration UI. The static bearer token represents a single administrator identity.
 2. Register the remote MCP URL in the server registry, leaving the shared token
    environment variable empty. Add an exact URL and issuer binding in
    `UPSTREAM_OAUTH_CONFIG`. For example:
@@ -188,7 +185,7 @@ bearer_token_env_var = "GATEWAY_TOKEN"
 | Variable | Purpose |
 | --- | --- |
 | `GATEWAY_TOKEN`, `OAUTH_CONFIG`, `ADMIN_SUBJECTS` | Choose static single-identity authentication or a trusted external JWT issuer and bootstrap administrators. |
-| `PORT`, `BIND_HOST`, `ALLOWED_HOST`, `ALLOWED_ORIGIN` | Listener and exact Host/Origin checks. |
+| `PORT`, `BIND_HOST`, `ALLOWED_HOST`, `ADDITIONAL_ALLOWED_HOSTS`, `ALLOWED_ORIGIN` | Listener and exact Host/Origin checks. |
 | `CONFIG_PATH`, `UPSTREAMS_PATH`, `UPSTREAM_CREDENTIALS` | Bootstrap, persisted active servers and endpoint-bound Bearer credential variables. |
 | `STATE_PATH`, `AUDIT_PATH`, `AUDIT_RETENTION_DAYS` | Policy/settings file and audit storage. Default audit retention is 30 days. |
 | `UPSTREAM_OAUTH_CONFIG`, `UPSTREAM_OAUTH_REDIRECT_URL`, `UPSTREAM_OAUTH_KEY`, `UPSTREAM_OAUTH_PATH` | Delegated upstream client bindings, callback, encryption and vault. |

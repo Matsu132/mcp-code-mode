@@ -1,6 +1,8 @@
 # MCP Code Mode Gateway (experimental)
 Vendor-neutral MCP gateway exposing search, describe and execute instead of every upstream tool. TypeScript input is transpiled (syntax checking, not semantic type checking), then evaluated in QuickJS WASM. Tool results remain MCP envelopes.
 
+[日本語の使い方](docs/ja.md)
+
 ## Architecture
 
 The Gateway keeps model-facing tool definitions fixed while discovering upstream
@@ -58,9 +60,6 @@ Build with docker build -t mcp-code-mode . and run with an env file and read-onl
 
 ## Tests
 npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run benchmark measures serialized JSON tokens using cl100k_base and o200k_base; pass a local JSON array of tool definitions with `npm run benchmark -- path/to/catalog.json`. The comparison covers multiple catalog sizes and itemizes search, describe and execute overhead for an illustrative call. It excludes execution results, generated declarations, prompts and protocol framing.
-
-## 日本語
-複数MCPを3ツールに集約する実験版です。TypeScript入力、検索、スキーマ型生成、定期カタログ更新、外部OAuth発行元のJWT検証とユーザー別許可リストに対応します。ChatGPT等との実機接続は未検証です。両アプリは `npm ci` でインストールできます。Docker Compose を使う場合は、接続設定を `config.json` として保存し、32文字以上のランダムな `GATEWAY_TOKEN` を環境変数に設定して `docker compose up --build` を実行します。管理画面は http://127.0.0.1:3001 です。上流OAuth委譲はユーザーごとに管理画面から接続します。公開運用前の独立した安全性検証は未実施です。公開運用前に docs/SECURITY.md を確認してください。
 
 ## References
 - https://modelcontextprotocol.io/specification/

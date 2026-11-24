@@ -36,3 +36,25 @@ jobs:
       - run: npm run build
       - run: npm audit --audit-level=high
       - run: docker build -t mcp-code-mode-admin .
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci --prefix apps/admin
+      - run: npm run build
+      - run: npm run build --prefix apps/admin
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/check-admin-ui.mjs
+        env:
+          UI_SCREENSHOTS_DIR: browser-screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: admin-screenshots
+          path: browser-screenshots
+          retention-days: 7

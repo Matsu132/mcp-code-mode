@@ -16,16 +16,17 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
-    "quickjs-emscripten": "^0.31.0",
-    "zod": "^4.6.7",
     "ajv": "^8.17.1",
-    "typescript": "^5.8.3",
     "jose": "^6.0.0",
-    "js-tiktoken": "^1.0.21"
+    "js-tiktoken": "^1.0.21",
+    "quickjs-emscripten": "^0.31.0",
+    "typescript": "^5.8.3",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
+    "playwright": "^1.65.1",
     "typescript-eslint": "^8.0.0"
   }
 }

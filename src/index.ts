@@ -1,45 +1,57 @@
-import { readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { z } from 'zod';
-import { Broker } from './broker.js';
-import { execute } from './sandbox.js';
-const config = z.array(z.object({id:z.string().regex(/^[a-zA-Z0-9_-]+$/),url:z.string().url(),tokenEnv:z.string().optional(),allow:z.array(z.string())})).parse(JSON.parse(await readFile(process.env.CONFIG_PATH??'config.json','utf8')));
-const token=process.env.GATEWAY_TOKEN;
-if (!token || token.length<32) throw new Error('GATEWAY_TOKEN must be at least 32 characters');
+import {readFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import {randomUUID} from 'node:crypto';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import {z} from 'zod';
+import {Broker,type Entry} from './broker.js';
+import {execute} from './sandbox.js';
+import {transpile} from './types.js';
+import {createAuth,permitted} from './auth.js';
+const config=z.array(z.object({id:z.string().regex(/^[a-zA-Z0-9_-]+$/),url:z.string().url(),tokenEnv:z.string().optional(),allow:z.array(z.string())})).parse(JSON.parse(await readFile(process.env.CONFIG_PATH??'config.json','utf8')));
+const auth=createAuth(process.env);
 const broker=new Broker();
-for (const c of config) {
+const clients=[];
+for(const c of config){
   const url=new URL(c.url);
-  if (url.protocol!=='https:' && !(url.protocol==='http:' && ['localhost','127.0.0.1'].includes(url.hostname))) throw new Error('HTTPS required');
+  if(url.username||url.password||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname))))throw Error('Trusted HTTPS URL required');
   const upstreamToken=c.tokenEnv?process.env[c.tokenEnv]:undefined;
-  if (c.tokenEnv&&!upstreamToken) throw new Error('Missing upstream token');
+  if(c.tokenEnv&&!upstreamToken)throw Error('Missing upstream token');
   const client=new Client({name:'mcp-code-mode',version:'0.1.0'});
   await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:upstreamToken?{Authorization:'Bearer '+upstreamToken}:{}}}));
-  let cursor:string|undefined;
-  do { const page=await client.listTools({cursor}); for(const t of page.tools) if(c.allow.includes(t.name)) broker.add({id:c.id+'.'+t.name,name:t.name,description:t.description??'',inputSchema:t.inputSchema,client}); cursor=page.nextCursor; } while(cursor);
+  clients.push({c,client});
 }
+async function refresh(){const entries:Entry[]=[];for(const {c,client} of clients){let cursor:string|undefined;let pages=0;do{if(++pages>100)throw Error('Too many pages');const page=await client.listTools({cursor}, {timeout:10000});for(const t of page.tools)if(c.allow.includes(t.name))entries.push({id:c.id+'.'+t.name,name:t.name,description:t.description??'',inputSchema:t.inputSchema,client});cursor=page.nextCursor;}while(cursor);}broker.replace(entries);}
+await refresh();
+let refreshing=false;
+const interval=setInterval(()=>{if(refreshing)return;refreshing=true;void refresh().catch(()=>{broker.replace([]);console.error(JSON.stringify({event:'refresh_failed'}));}).finally(()=>refreshing=false);},60000);interval.unref();
 const wrap=(v:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(v)}]});
 let active=0;
-createServer(async(req,res)=>{
-  const expected=Buffer.from('Bearer '+token); const actual=Buffer.from(req.headers.authorization??'');
-  if(actual.length!==expected.length||!timingSafeEqual(actual,expected)){res.writeHead(401).end();return;}
+const http=createServer(async(req,res)=>{
+  const requestId=randomUUID();
+  const allowedHost=process.env.ALLOWED_HOST??'127.0.0.1:'+String(process.env.PORT??3000);
+  if(req.headers.host!==allowedHost){res.writeHead(403).end();return;}
+  if(req.headers.origin&&req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
+  if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
   if(req.url!=='/mcp'||req.method!=='POST'){res.writeHead(405).end();return;}
-  if(req.headers.origin && req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
-  if(active>=4){res.writeHead(429).end();return;} active++;
-  const server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
-  const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined});
-  server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query)));
-  server.tool('describe','Get JSON Schema for a tool',{id:z.string().max(300)},async({id})=>wrap(broker.describe(id)));
-  server.tool('execute','Execute JavaScript async function body; use await mcp.call(id,args). Return only required data.',{code:z.string().max(32768)},async({code})=>wrap(await execute(code,broker)));
-  try {
+  if(active>=4){res.writeHead(429).end();return;}active++;
+  let server:McpServer|undefined;
+  try{
+    const principal=await auth.authenticate(req.headers.authorization??'');
+    if(!principal){const challenge=auth.metadata?'Bearer resource_metadata="'+new URL('/.well-known/oauth-protected-resource/mcp',auth.metadata.resource).href+'"':'Bearer';res.writeHead(401,{'WWW-Authenticate':challenge}).end();return;}
+    const allowed=(id:string)=>permitted(principal,id);
     const chunks:Buffer[]=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>65536){res.writeHead(413).end();return;}chunks.push(chunk);}
-    await server.connect(transport);
-    await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
-  } catch {if(!res.headersSent)res.writeHead(400).end();else res.end();}
-  finally {active--;await server.close();}
-}).listen(Number(process.env.PORT??3000),'127.0.0.1');
+    server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
+    const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
+    server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,allowed)));
+    server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{if(!allowed(id))throw Error('Unknown or denied tool');return wrap(broker.describe(id));});
+    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id))throw Error('Unknown or denied tool');const start=Date.now();try{const result=await broker.call(id,args,signal);console.error(JSON.stringify({event:'tool_call',requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start}));return result;}catch(e){console.error(JSON.stringify({event:'tool_call',requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start}));throw e;}}})));
+    await server.connect(transport);await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
+  }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}
+  finally{active--;await server?.close();}
+});
+http.requestTimeout=20000;http.headersTimeout=10000;
+http.listen(Number(process.env.PORT??3000),process.env.BIND_HOST??'127.0.0.1');

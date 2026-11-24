@@ -11,16 +11,18 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "start": "node dist/index.js",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "benchmark": "npm run build && node scripts/benchmark.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
     "quickjs-emscripten": "^0.31.0",
     "zod": "^4.6.7",
-    "ajv": "^8.17.1"
+    "ajv": "^8.17.1",
+    "typescript": "^5.8.3",
+    "jose": "^6.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "typescript-eslint": "^8.0.0"

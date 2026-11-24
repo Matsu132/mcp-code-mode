@@ -95,8 +95,8 @@ try {
   await page.getByLabel('Role tool IDs',{exact:true}).fill('inventory.count');
   await page.getByRole('button',{name:'ユーザーを追加',exact:true}).click();
   await page.getByLabel('User subject',{exact:true}).fill('fixture-viewer');
-  await page.getByRole('combobox',{name:'Role',exact:true}).click();
-  await page.getByRole('option',{name:'fixture-reader',exact:true}).click();
+  const roleSelect = page.getByRole('combobox',{name:'Role',exact:true});
+  await roleSelect.selectOption('fixture-reader');
   await page.getByRole('button',{name:'追加',exact:true}).click();
   await page.getByLabel('Subject',{exact:true}).fill('fixture-viewer');
   await page.getByLabel('Allowed tool IDs (comma separated)').fill('inventory.count');

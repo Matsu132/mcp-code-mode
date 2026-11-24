@@ -3,7 +3,7 @@
 import {useState} from 'react';
 import {
   Alert,Box,Button,Checkbox,Dialog,DialogActions,DialogTitle,FormControlLabel,
-  MenuItem,Paper,Snackbar,Stack,Table,TableBody,TableCell,TableHead,TablePagination,
+  Paper,Snackbar,Stack,Table,TableBody,TableCell,TableHead,TablePagination,
   TableRow,TextField,Typography,
 } from '@mui/material';
 
@@ -87,9 +87,9 @@ export default function Manage() {
               {data.assignments.map((assignment,i)=><Stack key={i} spacing={1} direction={{xs:'column',sm:'row'}}>
                 <TextField label="User subject" value={assignment.subject} disabled={busy}
                   onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{subject:e.target.value})}))}/>
-                <TextField select label="Role" value={roles.includes(assignment.role)?assignment.role:''} disabled={busy}
+                <TextField select slotProps={{select:{native:true}}} label="Role" value={roles.includes(assignment.role)?assignment.role:''} disabled={busy}
                   sx={{minWidth:150}} onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{role:e.target.value})}))}>
-                  {roles.map((role,index)=><MenuItem key={index} value={role}>{role}</MenuItem>)}
+                  {roles.map((role,index)=><option key={index} value={role}>{role}</option>)}
                 </TextField>
                 <FormControlLabel label="無効" control={<Checkbox checked={assignment.disabled} disabled={busy}
                   onChange={e=>setData(old=>({...old,assignments:replace(old.assignments,i,{disabled:e.target.checked})}))}/>}/>

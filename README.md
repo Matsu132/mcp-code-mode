@@ -20,7 +20,7 @@ as the local MCP client. The Gateway persists policies and audit entries in
 the `state` volume. Use Docker Engine on Linux for this configuration.
 
 ## OAuth resource server
-Alternatively set OAUTH_CONFIG to JSON with issuer, jwks, resource (exact HTTPS MCP URL), and users array of {sub,allow:["demo.list_items"]}. Use an external OAuth authorization server that supports MCP resource audiences and PKCE. JWT verification supports RS256 and ES256, validates issuer, audience, expiry and subject, and exposes protected resource metadata. Unknown subjects are denied. Never pass incoming tokens upstream. OAuth client registration and upstream OAuth delegation are not implemented.
+Alternatively set OAUTH_CONFIG to JSON with issuer, jwks, resource (exact HTTPS MCP URL), and users array of {sub,allow:["demo.list_items"]}. Use an external OAuth authorization server that supports MCP resource audiences and PKCE. JWT verification supports RS256 and ES256, validates issuer, audience, expiry and subject, and exposes protected resource metadata. Unknown subjects are denied. Never pass incoming tokens upstream. This config establishes the identity used for per-user upstream delegation.
 
 ## Example
 Search for list_items, describe demo.list_items, then execute with language typescript:
@@ -38,7 +38,7 @@ Build with docker build -t mcp-code-mode . and run with an env file and read-onl
 npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run benchmark measures serialized JSON tokens using cl100k_base and o200k_base; pass a local JSON array of tool definitions with `npm run benchmark -- path/to/catalog.json`. The comparison covers multiple catalog sizes and itemizes search, describe and execute overhead for an illustrative call. It excludes execution results, generated declarations, prompts and protocol framing.
 
 ## 日本語
-複数MCPを3ツールに集約する実験版です。TypeScript入力、検索、スキーマ型生成、定期カタログ更新、外部OAuth発行元のJWT検証とユーザー別許可リストに対応します。ChatGPT等との実機接続は未検証です。両アプリは `npm ci` でインストールできます。Docker Compose を使う場合は、接続設定を `config.json` として保存し、32文字以上のランダムな `GATEWAY_TOKEN` を環境変数に設定して `docker compose up --build` を実行します。管理画面は http://127.0.0.1:3001 です。上流OAuth委譲と独立した安全性検証は今後の課題です。公開運用前に docs/SECURITY.md を確認してください。
+複数MCPを3ツールに集約する実験版です。TypeScript入力、検索、スキーマ型生成、定期カタログ更新、外部OAuth発行元のJWT検証とユーザー別許可リストに対応します。ChatGPT等との実機接続は未検証です。両アプリは `npm ci` でインストールできます。Docker Compose を使う場合は、接続設定を `config.json` として保存し、32文字以上のランダムな `GATEWAY_TOKEN` を環境変数に設定して `docker compose up --build` を実行します。管理画面は http://127.0.0.1:3001 です。上流OAuth委譲はユーザーごとに管理画面から接続します。公開運用前の独立した安全性検証は未実施です。公開運用前に docs/SECURITY.md を確認してください。
 
 ## References
 - https://modelcontextprotocol.io/specification/
@@ -51,10 +51,10 @@ npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run
 Open `/admin` and enter a valid access token to inspect the authorized catalog. The token is not persisted. This is a read-only catalog viewer, not a configuration editor. Synthetic benchmark excludes protocol overhead.
 
 ## Next.js administration UI
-The separate app in `apps/admin` uses Next.js App Router, TypeScript, MUI Core and Emotion (free OSS components). Start the gateway first, then run `cd apps/admin && npm ci && npm run dev`. Open http://127.0.0.1:3001. Set GATEWAY_URL on the UI server if needed; the gateway Host allowlist must match that URL. The same-origin server route proxies the access token only to the configured gateway and does not store it. Dashboard counts are limited to the visible catalog (up to 30 tools). Dark mode and responsive navigation are supported. The /manage page edits additional subject restrictions and displays recent audit events. Administrators can create custom roles, assign roles to external OAuth subjects, disable assigned users and filter the recent audit list. The /servers page manages upstream URLs, credential bindings, connection status and tool allowlists. Upstream OAuth delegation is pending. Build the UI container with `docker build -t mcp-code-mode-admin apps/admin`; configure a private network and GATEWAY_URL, and publish only to localhost or a trusted TLS proxy.
+The separate app in `apps/admin` uses Next.js App Router, TypeScript, MUI Core and Emotion (free OSS components). Start the gateway first, then run `cd apps/admin && npm ci && npm run dev`. Open http://127.0.0.1:3001. Set GATEWAY_URL on the UI server if needed; the gateway Host allowlist must match that URL. The same-origin server route proxies the access token only to the configured gateway and does not store it. Dashboard counts are limited to the visible catalog (up to 30 tools). Dark mode and responsive navigation are supported. The /manage page edits additional subject restrictions and displays recent audit events. Administrators can create custom roles, assign roles to external OAuth subjects, disable assigned users and filter the recent audit list. The /servers page manages upstream URLs, credential bindings, connection status and tool allowlists. Build the UI container with `docker build -t mcp-code-mode-admin apps/admin`; configure a private network and GATEWAY_URL, and publish only to localhost or a trusted TLS proxy.
 
 ## Administrative policy and isolated execution
-Set ADMIN_SUBJECTS to a comma-separated list of trusted OAuth subject IDs (static operator is also admin). /manage provides an additional deny-by-default-for-listed-subjects policy editor and the latest 1000 retained audit events. Policies persist atomically in STATE_PATH (default state.json); mount a private writable directory. The Gateway image defaults to /data/state.json, so mount /data as a persistent volume. Tool outcomes and policy changes are persisted in a local SQLite file at AUDIT_PATH (default STATE_PATH plus .audit.sqlite). AUDIT_RETENTION_DAYS defaults to 30. Audit events omit tool arguments, responses and credentials. Protect both files and their parent directory with OS permissions. Upstream redirects are disallowed. Existing OAuth allowlists remain the upper bound. QuickJS now runs in a separate Node child with empty environment and Node permission restrictions, a hard parent deadline and bounded IPC. This is not OS-level network isolation; use a restricted container. Upstream OAuth delegation is not yet supported.
+Set ADMIN_SUBJECTS to a comma-separated list of trusted OAuth subject IDs (static operator is also admin). /manage provides an additional deny-by-default-for-listed-subjects policy editor and the latest 1000 retained audit events. Policies persist atomically in STATE_PATH (default state.json); mount a private writable directory. The Gateway image defaults to /data/state.json, so mount /data as a persistent volume. Tool outcomes and policy changes are persisted in a local SQLite file at AUDIT_PATH (default STATE_PATH plus .audit.sqlite). AUDIT_RETENTION_DAYS defaults to 30. Audit events omit tool arguments, responses and credentials. Protect both files and their parent directory with OS permissions. Upstream redirects are disallowed. Existing OAuth allowlists remain the upper bound. QuickJS now runs in a separate Node child with empty environment and Node permission restrictions, a hard parent deadline and bounded IPC. This is not OS-level network isolation; use a restricted container.
 
 ### Roles
 
@@ -96,3 +96,37 @@ bindings and inject the named token separately. Each token is bound to the
 exact endpoint. Only the environment variable name is returned to administrators.
 The admin form supports uncredentialed connections by leaving that field blank.
 Use the network firewall to restrict egress for operator-trusted endpoints.
+
+### Connecting users to upstream OAuth
+
+1. Configure Gateway authentication with `OAUTH_CONFIG` and enroll the user
+   subjects. The static bearer token represents a single administrator identity.
+2. Register the remote MCP URL in the server registry, leaving the shared token
+   environment variable empty. Add an exact URL and issuer binding in
+   `UPSTREAM_OAUTH_CONFIG`. For example:
+   `[{"id":"inventory","url":"https://mcp.example.com/mcp","issuer":"https://identity.example.com","clientId":"gateway-client-id","scope":"inventory.read"}]`.
+   Add `clientSecretEnv` for a confidential pre-registered client. With no
+   `clientId`, the Gateway requests a dynamic registration from the configured
+   issuer when it advertises an RFC 7591 registration endpoint.
+3. Set `UPSTREAM_OAUTH_REDIRECT_URL` to the exact administrator UI callback,
+   for example `https://admin.example.com/api/oauth/callback` (loopback HTTP is
+   usable with a provider that allows it). Register the same URL at the issuer.
+   Set `UPSTREAM_OAUTH_KEY` to a stable, random 32-byte base64url key. For
+   example, generate one with `node -p "require('node:crypto').randomBytes(32).toString('base64url')"`.
+4. Sign in on **OAuth Connections** with the Gateway token issued for your
+   subject, then connect the upstream account in the browser. After the
+   issuer redirects back, re-enter your Gateway token to reload status.
+
+Discovery requires protected-resource metadata for the exact MCP endpoint
+and an advertised issuer that matches the configured issuer. Authorization
+endpoints, including any configured `revocationEndpoint`, must use that
+issuer's HTTPS origin and resolve publicly. Authorization uses code flow
+with S256 PKCE, a one-time state and a browser binding. Matching OAuth
+credentials are encrypted in `UPSTREAM_OAUTH_PATH` (default `STATE_PATH`
+plus `.oauth.sqlite`). A missing or changed key prevents access to existing
+grants until they are replaced. Back up the key separately from the data.
+Tokens and the MCP sessions opened with them are scoped to the user.
+Use a single Gateway instance per vault. Refresh locking and pending
+authorization state are local to that process. Disconnect always deletes
+local credentials and attempts upstream revocation when an endpoint is available.
+Already-running upstream calls can continue until they complete or are cancelled.

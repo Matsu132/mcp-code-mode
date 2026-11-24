@@ -2,7 +2,13 @@ services:
   gateway:
     build: .
     environment:
-      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN to a random string of at least 32 characters}
+      GATEWAY_TOKEN: "${GATEWAY_TOKEN:-}"
+      OAUTH_CONFIG: "${OAUTH_CONFIG:-}"
+      ADMIN_SUBJECTS: "${ADMIN_SUBJECTS:-}"
+      UPSTREAM_CREDENTIALS: "${UPSTREAM_CREDENTIALS:-[]}"
+      UPSTREAM_OAUTH_CONFIG: "${UPSTREAM_OAUTH_CONFIG:-}"
+      UPSTREAM_OAUTH_KEY: "${UPSTREAM_OAUTH_KEY:-}"
+      UPSTREAM_OAUTH_REDIRECT_URL: "${UPSTREAM_OAUTH_REDIRECT_URL:-}"
       CONFIG_PATH: /config/config.json
     ports:
       - "127.0.0.1:3000:3000"

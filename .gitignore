@@ -7,3 +7,5 @@ state.json
 state.json.*
 *.audit.sqlite*
 browser-screenshots/
+*.oauth.sqlite*
+*.servers.json

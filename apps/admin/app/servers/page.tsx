@@ -7,9 +7,9 @@ import {
 } from '@mui/material';
 
 type Server = {id:string;url:string;tokenEnv?:string;allow:string[];enabled:boolean};
-type Managed = Server & {status:'ready'|'checking'|'error'|'disabled';tools:string[]};
+type Managed = Server & {status:'ready'|'checking'|'error'|'disabled'|'delegated';tools:string[]};
 const empty:Managed = {id:'',url:'',allow:[],enabled:true,status:'checking',tools:[]};
-const labels = {ready:'接続済み',checking:'確認中',error:'接続エラー',disabled:'無効'};
+const labels = {ready:'接続済み',checking:'確認中',error:'接続エラー',disabled:'無効',delegated:'ユーザー別OAuth'};
 
 function config({id,url,tokenEnv,allow,enabled}:Managed):Server {
   return {id:id.trim(),url:url.trim(),tokenEnv:tokenEnv?.trim()||undefined,allow:[...new Set(allow.map(t=>t.trim()).filter(Boolean))],enabled};
@@ -39,9 +39,10 @@ export default function Servers() {
       });
       if (!res.ok) throw Error('接続設定の読み込みまたは保存に失敗しました。URL、権限、認証設定を確認してください。');
       if (action==='test' && index!==undefined) {
-        const test = await res.json() as {status:'ready'|'error';tools:string[]};
+        const test = await res.json() as {status:'ready'|'error'|'delegated';tools:string[]};
         edit(index,test);
-        if (test.status==='error') setError('接続テストに失敗しました。URLと認証情報を確認してください。');
+        if (test.status==='delegated') setNotice('ユーザー別OAuthの接続状況はOAuth画面で確認できます。');
+        else if (test.status==='error') setError('接続テストに失敗しました。URLと認証情報を確認してください。');
         else setNotice('接続テストに成功しました。');
         return;
       }

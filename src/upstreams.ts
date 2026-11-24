@@ -4,6 +4,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {z} from 'zod';
 import {Broker,type Entry} from './broker.js';
+import type {DelegatedOAuth} from './upstream-oauth.js';
 import {upstreamNetwork,validateEndpoint} from './upstream-network.js';
 
 const credentialName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,99}$/);
@@ -32,9 +33,10 @@ export class Upstreams {
     private readonly trustedUrls:Set<string>,
     private readonly credentialBindings:Set<string>,
     private readonly broker:Broker,
+    private readonly oauth?:DelegatedOAuth,
   ) {}
 
-  static async open(configPath:string,statePath:string,broker:Broker) {
+  static async open(configPath:string,statePath:string,broker:Broker,oauth?:DelegatedOAuth) {
     const seed = registrySchema.parse(JSON.parse(await readFile(configPath,'utf8')));
     const urls = new Set(seed.map(server=>validateEndpoint(server.url,true).href));
     const attached = seed.flatMap(server=>server.tokenEnv?[{url:server.url,tokenEnv:server.tokenEnv}]:[]);
@@ -48,7 +50,7 @@ export class Upstreams {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code!=='ENOENT') throw error;
     }
-    const manager = new Upstreams(configs,statePath,urls,bindings,broker);
+    const manager = new Upstreams(configs,statePath,urls,bindings,broker,oauth);
     manager.validate(configs);
     return manager;
   }
@@ -63,6 +65,9 @@ export class Upstreams {
       if (ids.has(config.id)) throw Error('Duplicate server ID');
       ids.add(config.id);
       const url = validateEndpoint(config.url,this.trusted(config.url));
+      if (this.oauth?.reserves(config.id) && (!this.oauth.isDelegated(config) || config.tokenEnv)) {
+        throw Error('Invalid delegated OAuth binding');
+      }
       if (config.tokenEnv && !this.credentialBindings.has(JSON.stringify([url.href,config.tokenEnv]))) {
         throw Error('Credential is not bound to the endpoint');
       }
@@ -72,9 +77,26 @@ export class Upstreams {
   view() {
     return this.configs.map(config=>({
       ...config,
-      status:config.enabled?this.statuses.get(config.id)??'checking':'disabled',
+      authMode:this.oauth?.isDelegated(config)?'delegated':'shared',
+      status:config.enabled?(this.oauth?.isDelegated(config)?'delegated':this.statuses.get(config.id)??'checking'):'disabled',
       tools:this.connections.get(config.id)?.tools??[],
     }));
+  }
+
+  delegated(includeDisabled=false) {
+    return this.configs.filter(config=>(includeDisabled||config.enabled) && this.oauth?.isDelegated(config));
+  }
+
+  async openDelegated(id:string,token:string) {
+    const config = this.delegated().find(item=>item.id===id);
+    if (!config) throw Error('Delegated upstream unavailable');
+    const runtime = await this.connect(config,token);
+    const active = this.delegated().find(item=>item.id===id);
+    if (active!==config) {
+      await this.disconnect(runtime);
+      throw Error('Delegated upstream configuration changed');
+    }
+    return {entries:runtime.entries,close:()=>this.disconnect(runtime)};
   }
 
   private async disconnect(runtime:Runtime) {
@@ -108,13 +130,14 @@ export class Upstreams {
     runtime.tools = [...tools].sort();
   }
 
-  private async connect(config:Upstream) {
-    const url = validateEndpoint(config.url,this.trusted(config.url));
-    const token = config.tokenEnv?process.env[config.tokenEnv]:undefined;
+  private async connect(config:Upstream,delegatedToken?:string) {
+    const trusted = delegatedToken===undefined && this.trusted(config.url);
+    const url = validateEndpoint(config.url,trusted);
+    const token = delegatedToken??(config.tokenEnv?process.env[config.tokenEnv]:undefined);
     if (config.tokenEnv && !token) throw Error('Missing bound upstream credential');
-    const network = upstreamNetwork(url,this.trusted(config.url));
+    const network = upstreamNetwork(url,trusted);
     const client = new Client({name:'mcp-code-mode',version:'0.1.0'});
-    const runtime = {client,network,entries:[],tools:[]};
+    const runtime:Runtime = {client,network,entries:[],tools:[]};
     const signal = AbortSignal.timeout(10000);
     try {
       await client.connect(new StreamableHTTPClientTransport(url,{
@@ -137,7 +160,7 @@ export class Upstreams {
     if (this.busy) return;
     this.busy = true;
     try {
-      await Promise.all(this.configs.filter(config=>config.enabled).map(async config=>{
+      await Promise.all(this.configs.filter(config=>config.enabled&&!this.oauth?.isDelegated(config)).map(async config=>{
         const existing = this.connections.get(config.id);
         try {
           if (existing) await this.list(config,existing,AbortSignal.timeout(10000));
@@ -158,6 +181,7 @@ export class Upstreams {
   async test(raw:unknown) {
     const config = upstream.parse(raw);
     this.validate([config]);
+    if (this.oauth?.isDelegated(config)) return {status:'delegated',tools:[]};
     try {
       const runtime = await this.connect(config);
       try {

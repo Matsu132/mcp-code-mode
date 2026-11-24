@@ -5,6 +5,7 @@ const Ajv = AjvModule.default;
 export type Entry = { id: string; name: string; description: string; inputSchema: object; client: Client };
 export class Broker {
   private entries = new Map<string, Entry>();
+  snapshot() { const broker=new Broker();broker.replace([...this.entries.values()]);return broker; }
   add(entry: Entry) { if(this.entries.has(entry.id))throw Error('Duplicate tool');this.entries.set(entry.id,entry); }
   replace(entries:Entry[]){const next=new Map<string,Entry>();for(const e of entries){if(next.has(e.id))throw Error('Duplicate tool');next.set(e.id,e);}this.entries=next;}
   search(query:string,allowed:(id:string)=>boolean=()=>true){

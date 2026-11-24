@@ -41,11 +41,21 @@ export function validateEndpoint(raw:string,trusted:boolean) {
 export function upstreamNetwork(url:URL,trusted:boolean) {
   const dispatcher = new Agent({connect:{timeout:5000,lookup:trusted?undefined:publicLookup}});
   return {
-    fetch:(input:string|URL,init?:RequestInit) => {
+    fetch:async (input:string|URL,init?:RequestInit) => {
       if (new URL(input).origin!==url.origin) throw Error('Upstream origin changed');
       const options:RequestInit & {dispatcher:Agent} = {...init,dispatcher,redirect:'error'};
       options.signal = AbortSignal.any([AbortSignal.timeout(15000),...(options.signal?[options.signal]:[])]);
-      return fetch(input,options);
+      const response = await fetch(input,options);
+      if (!response.body) return response;
+      let bytes = 0;
+      const limited = response.body.pipeThrough(new TransformStream<Uint8Array,Uint8Array>({
+        transform(chunk,controller) {
+          bytes += chunk.byteLength;
+          if (bytes>4*1024*1024) controller.error(Error('Upstream response too large'));
+          else controller.enqueue(chunk);
+        },
+      }));
+      return new Response(limited,{status:response.status,statusText:response.statusText,headers:response.headers});
     },
     close:() => dispatcher.destroy(),
   };

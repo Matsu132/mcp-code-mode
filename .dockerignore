@@ -5,3 +5,5 @@ dist
 config.json
 state.json*
 *.audit.sqlite*
+*.oauth.sqlite*
+*.servers.json

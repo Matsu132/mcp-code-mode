@@ -1,7 +1,18 @@
 import AjvModule from 'ajv';
+import Ajv2019Module from 'ajv/dist/2019.js';
+import Ajv2020Module from 'ajv/dist/2020.js';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {declaration} from './types.js';
 const Ajv = AjvModule.default;
+const Ajv2019 = Ajv2019Module.default;
+const Ajv2020 = Ajv2020Module.default;
+
+function validatorClass(schema:object) {
+  const dialect=(schema as {$schema?:unknown}).$schema;
+  if(dialect==='https://json-schema.org/draft/2020-12/schema'||dialect==='https://json-schema.org/draft/2020-12/schema#') return Ajv2020;
+  if(dialect==='https://json-schema.org/draft/2019-09/schema'||dialect==='https://json-schema.org/draft/2019-09/schema#') return Ajv2019;
+  return Ajv;
+}
 export type Entry = { id: string; name: string; description: string; inputSchema: object; client: Client };
 export class Broker {
   private entries = new Map<string, Entry>();
@@ -20,7 +31,8 @@ export class Broker {
     const e=this.entries.get(id);if(!e)throw Error('Unknown or denied tool');
     if(signal.aborted)throw Error('Execution expired');
     if(!args||typeof args!=='object'||Array.isArray(args)||Buffer.byteLength(JSON.stringify(args))>65536)throw Error('Invalid arguments');
-    const validate=new Ajv({strict:false,allErrors:false}).compile(e.inputSchema);
+    const Validator=validatorClass(e.inputSchema);
+    const validate=new Validator({strict:false,allErrors:false}).compile(e.inputSchema);
     if(!validate(args))throw Error('Invalid arguments');
     const result=await e.client.callTool({name:e.name,arguments:args as Record<string,unknown>},undefined,{signal,timeout:10000});
     const json=JSON.stringify(result);if(Buffer.byteLength(json)>262144)throw Error('Tool result too large');return json;

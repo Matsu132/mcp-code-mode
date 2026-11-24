@@ -1,4 +1,4 @@
-import { getQuickJS } from 'quickjs-emscripten';
+import { getQuickJS, type QuickJSDeferredPromise } from 'quickjs-emscripten';
 import type { Broker } from './broker.js';
 export async function execute(code: string, broker: Pick<Broker,'call'>, limits: {timeoutMs?:number} = {}): Promise<unknown> {
   if (Buffer.byteLength(code)>32768) throw new Error('Code too large');
@@ -9,11 +9,13 @@ export async function execute(code: string, broker: Pick<Broker,'call'>, limits:
   runtime.setInterruptHandler(()=>Date.now()>deadline);
   const vm = runtime.newContext(); const controller = new AbortController();
   const timer = setTimeout(()=>controller.abort(),timeoutMs);
-  const pending = new Set<Promise<void>>(); let calls=0;
+  const pending = new Set<QuickJSDeferredPromise>(); let calls=0;
   try {
     const call = vm.newFunction('call', (id,args)=>{
       const deferred = vm.newPromise();
-      const task = (async()=>{
+      pending.add(deferred);
+      void deferred.settled.then(()=>pending.delete(deferred));
+      void (async()=>{
         try {
           if (++calls>20 || controller.signal.aborted) throw new Error('Call budget exceeded');
           const toolId=vm.getString(id), raw=vm.getString(args);
@@ -22,7 +24,6 @@ export async function execute(code: string, broker: Pick<Broker,'call'>, limits:
           if (!controller.signal.aborted) { const h=vm.newString(result); deferred.resolve(h); h.dispose(); }
         } catch { if (!controller.signal.aborted) { const h=vm.newString('Tool call failed or denied'); deferred.reject(h); h.dispose(); } }
       })();
-      pending.add(task); void task.finally(()=>pending.delete(task));
       return deferred.handle;
     });
     vm.setProp(vm.global,'__call',call); call.dispose();
@@ -41,8 +42,9 @@ export async function execute(code: string, broker: Pick<Broker,'call'>, limits:
     } finally {promise.dispose();}
   } finally {
     controller.abort(); clearTimeout(timer);
-    // Pending broker calls cannot access the VM after abort.
-    await Promise.allSettled([...pending]);
+    // Late broker responses skip the VM once the controller is aborted.
+    for (const deferred of pending) deferred.dispose();
+    pending.clear();
     vm.dispose(); runtime.dispose();
   }
 }

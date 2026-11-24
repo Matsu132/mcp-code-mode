@@ -1,0 +1,40 @@
+import AjvModule from 'ajv';
+import Ajv2019Module from 'ajv/dist/2019.js';
+import Ajv2020Module from 'ajv/dist/2020.js';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import {declaration} from './types.js';
+const Ajv = AjvModule.default;
+const Ajv2019 = Ajv2019Module.default;
+const Ajv2020 = Ajv2020Module.default;
+
+function validatorClass(schema:object) {
+  const dialect=(schema as {$schema?:unknown}).$schema;
+  if(dialect==='https://json-schema.org/draft/2020-12/schema'||dialect==='https://json-schema.org/draft/2020-12/schema#') return Ajv2020;
+  if(dialect==='https://json-schema.org/draft/2019-09/schema'||dialect==='https://json-schema.org/draft/2019-09/schema#') return Ajv2019;
+  return Ajv;
+}
+export type Entry = { id: string; name: string; description: string; inputSchema: object; client: Client };
+export class Broker {
+  private entries = new Map<string, Entry>();
+  snapshot() { const broker=new Broker();broker.replace([...this.entries.values()]);return broker; }
+  add(entry: Entry) { if(this.entries.has(entry.id))throw Error('Duplicate tool');this.entries.set(entry.id,entry); }
+  replace(entries:Entry[]){const next=new Map<string,Entry>();for(const e of entries){if(next.has(e.id))throw Error('Duplicate tool');next.set(e.id,e);}this.entries=next;}
+  catalog(allowed:(id:string)=>boolean){
+    return [...this.entries.values()].filter(entry=>allowed(entry.id)).map(({id,name,description,inputSchema})=>({id,name,description,inputSchema}));
+  }
+  search(query:string,allowed:(id:string)=>boolean=()=>true){
+    const words=query.toLowerCase().split(/\s+/).filter(Boolean);
+    return [...this.entries.values()].filter(e=>allowed(e.id)).map(e=>({e,score:words.reduce((n,w)=>n+(e.id.toLowerCase().includes(w)?3:0)+(e.description.toLowerCase().includes(w)?1:0),0)})).filter(x=>!words.length||x.score>0).sort((a,b)=>b.score-a.score||a.e.id.localeCompare(b.e.id)).slice(0,30).map(({e:{id,description}})=>({id,description:description.slice(0,500)}));
+  }
+  describe(id:string){const e=this.entries.get(id);if(!e)throw Error('Unknown or denied tool');return {id,inputSchema:e.inputSchema,description:e.description,typescript:declaration(id,e.inputSchema)};}
+  async call(id:string,args:unknown,signal:AbortSignal){
+    const e=this.entries.get(id);if(!e)throw Error('Unknown or denied tool');
+    if(signal.aborted)throw Error('Execution expired');
+    if(!args||typeof args!=='object'||Array.isArray(args)||Buffer.byteLength(JSON.stringify(args))>65536)throw Error('Invalid arguments');
+    const Validator=validatorClass(e.inputSchema);
+    const validate=new Validator({strict:false,allErrors:false}).compile(e.inputSchema);
+    if(!validate(args))throw Error('Invalid arguments');
+    const result=await e.client.callTool({name:e.name,arguments:args as Record<string,unknown>},undefined,{signal,timeout:10000});
+    const json=JSON.stringify(result);if(Buffer.byteLength(json)>262144)throw Error('Tool result too large');return json;
+  }
+}

@@ -1,0 +1,251 @@
+import assert from 'node:assert/strict';
+import {randomBytes} from 'node:crypto';
+import {once} from 'node:events';
+import {spawn} from 'node:child_process';
+import {createServer} from 'node:http';
+import {mkdtemp, writeFile, rm, cp, mkdir} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,resolve} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
+import {chromium} from 'playwright';
+import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+
+const project = resolve(import.meta.dirname,'..');
+const temporary = await mkdtemp(join(tmpdir(),'mcp-ui-'));
+const children = [];
+const screenshots = process.env.UI_SCREENSHOTS_DIR;
+const processes = (args,cwd,env) => {
+  const child = spawn(process.execPath,args,{cwd,env:{NODE_ENV:'production',...env},stdio:['ignore','ignore','inherit']});
+  children.push(child);
+  return child;
+};
+async function openPort(server) {
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  return server.address().port;
+}
+async function freePort() {
+  const server = createServer();
+  const port = await openPort(server);
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+async function ready(url) {
+  for (let attempts=0; attempts<100; attempts++) {
+    const response = await fetch(url,{signal:AbortSignal.timeout(300)}).catch(() => null);
+    if(response) return;
+    await delay(50);
+  }
+  throw Error('Service did not start');
+}
+
+const laterTools=Array.from({length:51},(_,i)=>'item_'+String(i).padStart(2,'0'));
+const upstream = createServer(async (req,res) => {
+  const mcp = new McpServer({name:'inventory-fixture',version:'1.0.0'});
+  mcp.tool('count','Read the number of inventory items',{}, async () => ({content:[{type:'text',text:'3'}]}));
+  for(const name of laterTools)mcp.tool(name,{},async()=>({content:[]}));
+  const transport = new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
+  try {
+    await mcp.connect(transport);
+    await transport.handleRequest(req,res);
+  } finally { await mcp.close(); }
+});
+let browser;
+try {
+  const upstreamPort = await openPort(upstream);
+  const config = join(temporary,'config.json');
+  const upstreamUrl=`http://127.0.0.1:${upstreamPort}/mcp`;
+  const delegatedUrl='https://resource.fixture.test/mcp';
+  await writeFile(config,JSON.stringify([
+    {id:'inventory',url:upstreamUrl,allow:['count',...laterTools]},
+    {id:'oauth-fixture',url:delegatedUrl,allow:['count'],enabled:false},
+  ]));
+  const gatewayPort = await freePort();
+  const adminPort = await freePort();
+  const token = 'ui-fixture-local-credential-0123456789';
+  const base = `http://127.0.0.1:${gatewayPort}`;
+  const admin = `http://127.0.0.1:${adminPort}`;
+  processes(['--import','./test/fixtures/delegated-network.mjs','dist/index.js'],project,{
+    PORT:gatewayPort,STATE_PATH:join(temporary,'state.json'),CONFIG_PATH:config,GATEWAY_TOKEN:token,
+    FIXTURE_MCP:upstreamUrl,
+    UPSTREAM_OAUTH_CONFIG:JSON.stringify([{id:'oauth-fixture',url:delegatedUrl,issuer:'https://authorization.fixture.test',clientId:'gateway-fixture'}]),
+    UPSTREAM_OAUTH_KEY:randomBytes(32).toString('base64url'),
+    UPSTREAM_OAUTH_REDIRECT_URL:admin+'/api/oauth/callback',
+  });
+  const standalone = join(project,'apps/admin/.next/standalone');
+  await cp(join(project,'apps/admin/.next/static'),join(standalone,'.next/static'),{recursive:true});
+  processes(['server.js'],standalone,{PORT:adminPort,HOSTNAME:'127.0.0.1',GATEWAY_URL:base});
+  await Promise.all([ready(base+'/admin/state'),ready(admin)]);
+  for(const [path,method,limit] of [['/api/settings','PUT',65536],['/api/state','PUT',65536],['/api/upstreams?action=test','POST',65536],['/api/oauth','POST',1024]]){
+    const body=new ReadableStream({start(controller){
+      controller.enqueue(new Uint8Array(limit));
+      controller.enqueue(new Uint8Array(1));
+      controller.close();
+    }});
+    const response=await fetch(admin+path,{method,headers:{Authorization:'Bearer fixture-invalid'},body,duplex:'half'});
+    assert.equal(response.status,413,path);
+  }
+  browser = await chromium.launch();
+  const page = await browser.newPage({viewport:{width:1440,height:900}});
+  const pageErrors = [];
+  page.on('pageerror', err => pageErrors.push(err.message));
+  await page.goto(base+'/admin');
+  await page.getByLabel('Access token').fill(token);
+  await page.getByRole('button',{name:'Load catalog'}).click();
+  await page.getByText('inventory.count',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Next',exact:true}).click();
+  await page.getByText('inventory.item_50',{exact:true}).waitFor();
+  await page.getByLabel('Filter').fill('item_49');
+  await page.getByRole('button',{name:'Search',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'1–1 of 1 tools'}).waitFor();
+  await page.getByText('inventory.item_49',{exact:true}).waitFor();
+  assert.equal(await page.getByText('inventory.item_50',{exact:true}).count(),0);
+  await page.goto(admin);
+  await page.getByLabel('Access token').fill('invalid-token');
+  await page.getByRole('button',{name:'Load catalog'}).click();
+  await page.getByRole('alert').filter({hasText:'Authentication failed'}).waitFor();
+  await page.getByLabel('Access token').fill(token);
+  await page.getByRole('button',{name:'Load catalog'}).click();
+  await page.getByText('inventory.count',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Access token').inputValue(),'');
+  await page.getByRole('button',{name:'inventory.count',exact:true}).click();
+  await page.getByRole('dialog').getByText('JSON Schema',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'閉じる',exact:true}).click();
+  if (screenshots) {
+    await mkdir(screenshots,{recursive:true});
+    await page.screenshot({path:join(screenshots,'admin-dashboard.png'),fullPage:true});
+  }
+  const requestSeen=Promise.withResolvers();
+  const releasePage=Promise.withResolvers();
+  const routeFinished=Promise.withResolvers();
+  const delayPage=async route=>{
+    if(new URL(route.request().url()).searchParams.get('offset')!=='15')return route.continue();
+    requestSeen.resolve();
+    await releasePage.promise;
+    try{await route.fulfill({json:{subject:'stale',tools:[],total:0}});}catch{}
+    finally{routeFinished.resolve();}
+  };
+  await page.route('**/api/catalog?*',delayPage);
+  await page.getByRole('button',{name:'Go to next page'}).click();
+  await requestSeen.promise;
+  await page.getByRole('button',{name:'Clear',exact:true}).click();
+  releasePage.resolve();
+  await routeFinished.promise;
+  await page.getByText('Authenticate to view tools',{exact:true}).waitFor();
+  assert.equal(await page.getByText('inventory.count',{exact:true}).count(),0);
+  await page.unroute('**/api/catalog?*',delayPage);
+
+  await page.getByRole('button',{name:'Toggle color mode'}).click();
+  await page.setViewportSize({width:400,height:850});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),true);
+  await page.getByRole('button',{name:'Open navigation'}).click();
+  await page.getByRole('button',{name:'Tools'}).click();
+  await page.getByRole('heading',{name:'Tools',exact:true}).waitFor();
+  await page.setViewportSize({width:1440,height:900});
+  await page.getByRole('link',{name:'管理',exact:true}).click();
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'読み込み'}).click();
+  await page.getByRole('button',{name:'ロールを追加',exact:true}).click();
+  await page.getByLabel('Role ID',{exact:true}).fill('fixture-reader');
+  await page.getByLabel('Allowed server IDs',{exact:true}).fill('inventory');
+  await page.getByLabel('Role tool IDs',{exact:true}).fill('inventory.count');
+  await page.getByRole('button',{name:'ユーザーを追加',exact:true}).click();
+  await page.getByLabel('User subject',{exact:true}).fill('fixture-viewer');
+  const roleSelect = page.getByRole('combobox',{name:'Role',exact:true});
+  await roleSelect.selectOption('fixture-reader');
+  await page.getByRole('button',{name:'追加',exact:true}).click();
+  await page.getByLabel('Subject',{exact:true}).fill('fixture-viewer');
+  await page.getByLabel('Allowed tool IDs (comma separated)').fill('inventory.count');
+  const [saved] = await Promise.all([
+    page.waitForResponse(r=>r.url().endsWith('/api/state')&&r.request().method()==='PUT'),
+    page.getByRole('button',{name:'保存',exact:true}).click(),
+  ]);
+  assert.equal(saved.status(),200);
+  await page.reload();
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'読み込み'}).click();
+  const subject = page.getByLabel('Subject',{exact:true});
+  await subject.waitFor();
+  assert.equal(await subject.inputValue(),'fixture-viewer');
+  assert.equal(await page.getByLabel('Role ID',{exact:true}).inputValue(),'fixture-reader');
+  assert.equal(await page.getByLabel('User subject',{exact:true}).inputValue(),'fixture-viewer');
+  await page.getByText('success',{exact:true}).waitFor();
+  await page.getByLabel('Administrator access token').blur();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-policy-audit.png'),fullPage:true});
+  await page.goto(admin+'/benchmarks');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'比較を計算'}).click();
+  await page.getByRole('heading',{name:'合成ツールカタログ'}).waitFor();
+  await page.getByRole('heading',{name:/実カタログ/}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-benchmarks.png'),fullPage:true});
+  await page.goto(admin+'/servers');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'保存済み設定を読み込む'}).click();
+  await page.getByText('接続済み',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'接続テスト',exact:true}).first().click();
+  await page.getByText('接続テストに成功しました。',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-servers.png'),fullPage:true});
+  const serverEnabled=page.getByRole('checkbox',{name:'有効',exact:true});
+  await serverEnabled.nth(0).uncheck();
+  await serverEnabled.nth(1).check();
+  await page.getByRole('button',{name:'保存',exact:true}).click();
+  await page.getByText('接続設定を保存しました。',{exact:true}).waitFor();
+  await page.goto(admin+'/settings');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'実行設定を読み込む'}).click();
+  await page.getByRole('spinbutton',{name:'Maximum concurrent executions'}).fill('2');
+  await page.getByRole('button',{name:'保存',exact:true}).click();
+  await page.getByText('実行設定を保存しました。',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-settings.png'),fullPage:true});
+  const settings = await fetch(base+'/admin/settings',{headers:{Authorization:'Bearer '+token}});
+  assert.equal((await settings.json()).concurrency,2);
+
+  const registry = await fetch(base+'/admin/upstreams',{headers:{Authorization:'Bearer '+token}});
+  const [shared,delegated]=await registry.json();
+  assert.equal(shared.enabled,false);
+  assert.equal(delegated.enabled,true);
+
+  const earlier=await page.request.post(admin+'/api/oauth',{
+    headers:{Authorization:'Bearer '+token},data:{action:'connect',id:'oauth-fixture'},
+  });
+  assert.equal(earlier.status(),200);
+  const oldState=new URL((await earlier.json()).authorizationUrl).searchParams.get('state');
+  await page.route(/^https:\/\/authorization\.fixture\.test\/authorize\?/,async route=>{
+    const oldCallback=await page.request.get(admin+'/api/oauth/callback?'+new URLSearchParams({state:oldState,code:'alice'}),{maxRedirects:0});
+    assert.equal(oldCallback.headers().location,'/oauth-connections?result=failed');
+    const authorization=new URL(route.request().url());
+    assert.equal(authorization.searchParams.get('code_challenge_method'),'S256');
+    const callback=new URL(authorization.searchParams.get('redirect_uri'));
+    assert.equal(callback.origin,admin);
+    callback.searchParams.set('state',authorization.searchParams.get('state'));
+    callback.searchParams.set('code','alice');
+    await route.fulfill({status:302,headers:{Location:callback.href},body:''});
+  });
+  await page.goto(admin+'/oauth-connections');
+  const authInput=page.getByLabel('Gateway access token');
+  await authInput.fill(token);
+  await page.getByRole('button',{name:'接続状況を読み込む'}).click();
+  await page.getByRole('button',{name:'接続',exact:true}).click();
+  await page.getByText('上流MCPへのOAuth接続を保存しました。',{exact:true}).waitFor();
+  await authInput.fill(token);
+  await page.getByRole('button',{name:'接続状況を読み込む'}).click();
+  await page.getByText('接続済み',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-oauth-connections.png'),fullPage:true});
+  await page.getByRole('button',{name:'解除',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'解除',exact:true}).click();
+  await page.getByText('未接続',{exact:true}).waitFor();
+  assert.deepEqual(pageErrors,[]);
+  console.log('Browser smoke check passed: invalid authentication, catalog, token clearing, dark-mode toggle, mobile navigation, policy save and reload, audit log, upstream connection test, persisted upstream settings, benchmarks, Sandbox settings and the browser-bound OAuth callback.');
+} finally {
+  await browser?.close();
+  const exits = children.filter(p=>p.exitCode===null&&p.signalCode===null).map(p=>{
+    const exit = once(p,'exit');
+    p.kill();
+    return exit;
+  });
+  await Promise.all(exits);
+  upstream.closeAllConnections();
+  upstream.close();
+  await rm(temporary,{recursive:true,force:true});
+}

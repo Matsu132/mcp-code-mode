@@ -1,0 +1,52 @@
+services:
+  gateway:
+    build: .
+    environment:
+      GATEWAY_TOKEN: "${GATEWAY_TOKEN:-}"
+      OAUTH_CONFIG: "${OAUTH_CONFIG:-}"
+      ADMIN_SUBJECTS: "${ADMIN_SUBJECTS:-}"
+      UPSTREAM_CREDENTIALS: "${UPSTREAM_CREDENTIALS:-[]}"
+      UPSTREAM_OAUTH_CONFIG: "${UPSTREAM_OAUTH_CONFIG:-}"
+      UPSTREAM_OAUTH_KEY: "${UPSTREAM_OAUTH_KEY:-}"
+      UPSTREAM_OAUTH_REDIRECT_URL: "${UPSTREAM_OAUTH_REDIRECT_URL:-}"
+      CONFIG_PATH: /config/config.json
+      ADDITIONAL_ALLOWED_HOSTS: gateway:3000
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - type: bind
+        source: ./config.json
+        target: /config/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - state:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 12
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    pids_limit: 128
+  admin:
+    build: ./apps/admin
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      GATEWAY_URL: http://gateway:3000
+    ports:
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 12
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 128
+volumes:
+  state:

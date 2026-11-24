@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.env*
+config.json
+state.json*
+*.audit.sqlite*
+*.oauth.sqlite*
+*.servers.json

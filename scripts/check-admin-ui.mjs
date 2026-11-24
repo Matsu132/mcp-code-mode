@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {randomBytes} from 'node:crypto';
 import {once} from 'node:events';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
@@ -15,7 +16,7 @@ const temporary = await mkdtemp(join(tmpdir(),'mcp-ui-'));
 const children = [];
 const screenshots = process.env.UI_SCREENSHOTS_DIR;
 const processes = (args,cwd,env) => {
-  const child = spawn(process.execPath,args,{cwd,env:{...process.env,...env},stdio:['ignore','ignore','inherit']});
+  const child = spawn(process.execPath,args,{cwd,env:{NODE_ENV:'production',...env},stdio:['ignore','ignore','inherit']});
   children.push(child);
   return child;
 };
@@ -52,13 +53,24 @@ let browser;
 try {
   const upstreamPort = await openPort(upstream);
   const config = join(temporary,'config.json');
-  await writeFile(config,JSON.stringify([{id:'inventory',url:`http://127.0.0.1:${upstreamPort}/mcp`,allow:['count']}]));
+  const upstreamUrl=`http://127.0.0.1:${upstreamPort}/mcp`;
+  const delegatedUrl='https://resource.fixture.test/mcp';
+  await writeFile(config,JSON.stringify([
+    {id:'inventory',url:upstreamUrl,allow:['count']},
+    {id:'oauth-fixture',url:delegatedUrl,allow:['count'],enabled:false},
+  ]));
   const gatewayPort = await freePort();
   const adminPort = await freePort();
   const token = 'ui-fixture-local-credential-0123456789';
   const base = `http://127.0.0.1:${gatewayPort}`;
   const admin = `http://127.0.0.1:${adminPort}`;
-  processes(['dist/index.js'],project,{PORT:gatewayPort,STATE_PATH:join(temporary,'state.json'),CONFIG_PATH:config,GATEWAY_TOKEN:token});
+  processes(['--import','./test/fixtures/delegated-network.mjs','dist/index.js'],project,{
+    PORT:gatewayPort,STATE_PATH:join(temporary,'state.json'),CONFIG_PATH:config,GATEWAY_TOKEN:token,
+    FIXTURE_MCP:upstreamUrl,
+    UPSTREAM_OAUTH_CONFIG:JSON.stringify([{id:'oauth-fixture',url:delegatedUrl,issuer:'https://authorization.fixture.test',clientId:'gateway-fixture'}]),
+    UPSTREAM_OAUTH_KEY:randomBytes(32).toString('base64url'),
+    UPSTREAM_OAUTH_REDIRECT_URL:admin+'/api/oauth/callback',
+  });
   const standalone = join(project,'apps/admin/.next/standalone');
   await cp(join(project,'apps/admin/.next/static'),join(standalone,'.next/static'),{recursive:true});
   processes(['server.js'],standalone,{PORT:adminPort,HOSTNAME:'127.0.0.1',GATEWAY_URL:base});
@@ -129,10 +141,12 @@ try {
   await page.getByLabel('Administrator access token').fill(token);
   await page.getByRole('button',{name:'保存済み設定を読み込む'}).click();
   await page.getByText('接続済み',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'接続テスト',exact:true}).click();
+  await page.getByRole('button',{name:'接続テスト',exact:true}).first().click();
   await page.getByText('接続テストに成功しました。',{exact:true}).waitFor();
   if (screenshots) await page.screenshot({path:join(screenshots,'admin-servers.png'),fullPage:true});
-  await page.getByRole('checkbox',{name:'有効',exact:true}).uncheck();
+  const serverEnabled=page.getByRole('checkbox',{name:'有効',exact:true});
+  await serverEnabled.nth(0).uncheck();
+  await serverEnabled.nth(1).check();
   await page.getByRole('button',{name:'保存',exact:true}).click();
   await page.getByText('接続設定を保存しました。',{exact:true}).waitFor();
   await page.goto(admin+'/settings');
@@ -141,13 +155,39 @@ try {
   await page.getByRole('spinbutton',{name:'Maximum concurrent executions'}).fill('2');
   await page.getByRole('button',{name:'保存',exact:true}).click();
   await page.getByText('実行設定を保存しました。',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-settings.png'),fullPage:true});
   const settings = await fetch(base+'/admin/settings',{headers:{Authorization:'Bearer '+token}});
   assert.equal((await settings.json()).concurrency,2);
 
   const registry = await fetch(base+'/admin/upstreams',{headers:{Authorization:'Bearer '+token}});
-  assert.equal((await registry.json())[0].enabled,false);
+  const [shared,delegated]=await registry.json();
+  assert.equal(shared.enabled,false);
+  assert.equal(delegated.enabled,true);
+
+  await page.route(/^https:\/\/authorization\.fixture\.test\/authorize\?/,async route=>{
+    const authorization=new URL(route.request().url());
+    assert.equal(authorization.searchParams.get('code_challenge_method'),'S256');
+    const callback=new URL(authorization.searchParams.get('redirect_uri'));
+    assert.equal(callback.origin,admin);
+    callback.searchParams.set('state',authorization.searchParams.get('state'));
+    callback.searchParams.set('code','alice');
+    await route.fulfill({status:302,headers:{Location:callback.href},body:''});
+  });
+  await page.goto(admin+'/oauth-connections');
+  const authInput=page.getByLabel('Gateway access token');
+  await authInput.fill(token);
+  await page.getByRole('button',{name:'接続状況を読み込む'}).click();
+  await page.getByRole('button',{name:'接続',exact:true}).click();
+  await page.getByText('上流MCPへのOAuth接続を保存しました。',{exact:true}).waitFor();
+  await authInput.fill(token);
+  await page.getByRole('button',{name:'接続状況を読み込む'}).click();
+  await page.getByText('接続済み',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-oauth-connections.png'),fullPage:true});
+  await page.getByRole('button',{name:'解除',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'解除',exact:true}).click();
+  await page.getByText('未接続',{exact:true}).waitFor();
   assert.deepEqual(pageErrors,[]);
-  console.log('Browser smoke check passed: invalid authentication, catalog, token clearing, dark-mode toggle, mobile navigation, policy save and reload, audit log, upstream connection test, and persisted upstream settings.');
+  console.log('Browser smoke check passed: invalid authentication, catalog, token clearing, dark-mode toggle, mobile navigation, policy save and reload, audit log, upstream connection test, persisted upstream settings, benchmarks, Sandbox settings and the browser-bound OAuth callback.');
 } finally {
   await browser?.close();
   const exits = children.filter(p=>p.exitCode===null&&p.signalCode===null).map(p=>{

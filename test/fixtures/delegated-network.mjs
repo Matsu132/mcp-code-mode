@@ -1,6 +1,7 @@
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = async (input,init) => {
   const url = new URL(input);
+  if (url.href===process.env.FIXTURE_MCP) return nativeFetch(input,init);
   if (url.origin==='https://identity.fixture.test' && url.pathname==='/jwks') {
     return Response.json({keys:[JSON.parse(process.env.FIXTURE_JWK)]});
   }

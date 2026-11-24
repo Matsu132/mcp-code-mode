@@ -7,12 +7,14 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {z} from 'zod';
 import {Broker,type Entry} from './broker.js';
-import {execute} from './sandbox.js';
+import {executeIsolated as execute} from './isolated.js';
+import {Management} from './management.js';
 import {transpile} from './types.js';
 import {createAuth,permitted} from './auth.js';
 import {adminPage} from './admin.js';
 const config=z.array(z.object({id:z.string().regex(/^[a-zA-Z0-9_-]+$/),url:z.string().url(),tokenEnv:z.string().optional(),allow:z.array(z.string())})).parse(JSON.parse(await readFile(process.env.CONFIG_PATH??'config.json','utf8')));
 const auth=createAuth(process.env);
+const management=await Management.open(process.env.STATE_PATH??'state.json');
 const broker=new Broker();
 const clients: {c:(typeof config)[number];client:Client}[]=[];
 for(const c of config){
@@ -37,21 +39,24 @@ const http=createServer(async(req,res)=>{
   if(req.headers.origin&&req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
   if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
   if(req.url==='/admin'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"}).end(adminPage);return;}
-  if(!['/mcp','/admin/catalog'].includes(req.url??'')||(req.url==='/mcp'?req.method!=='POST':req.method!=='GET')){res.writeHead(405).end();return;}
+  if(!['/mcp','/admin/catalog','/admin/state'].includes(req.url??'')||(req.url==='/mcp'?req.method!=='POST':req.url==='/admin/state'?!['GET','PUT'].includes(req.method??''):req.method!=='GET')){res.writeHead(405).end();return;}
   if(active>=4){res.writeHead(429).end();return;}active++;
   let server:McpServer|undefined;
   try{
     const principal=await auth.authenticate(req.headers.authorization??'');
     if(!principal){const challenge=auth.metadata?'Bearer resource_metadata="'+new URL('/.well-known/oauth-protected-resource/mcp',auth.metadata.resource).href+'"':'Bearer';res.writeHead(401,{'WWW-Authenticate':challenge}).end();return;}
-    const allowed=(id:string)=>permitted(principal,id);
+    const allowed=(id:string)=>permitted(principal,id)&&management.allowed(principal.id,id);
+    if(req.url==='/admin/state'&&!principal.admin){res.writeHead(403).end();return;}
+    if(req.url==='/admin/state'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify(management.view()));return;}
     if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:broker.search('',allowed)}));return;}
     const chunks:Buffer[]=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>65536){res.writeHead(413).end();return;}chunks.push(chunk);}
+    if(req.url==='/admin/state'){await management.update(JSON.parse(Buffer.concat(chunks).toString()));res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(management.view()));return;}
     server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,allowed)));
     server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{if(!allowed(id))throw Error('Unknown or denied tool');return wrap(broker.describe(id));});
-    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id))throw Error('Unknown or denied tool');const start=Date.now();try{const result=await broker.call(id,args,signal);console.error(JSON.stringify({event:'tool_call',requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start}));return result;}catch(e){console.error(JSON.stringify({event:'tool_call',requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start}));throw e;}}})));
+    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id))throw Error('Unknown or denied tool');const start=Date.now();try{const result=await broker.call(id,args,signal);management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});return result;}catch(e){management.record({requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start});throw e;}}})));
     await server.connect(transport);await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
   }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}
   finally{active--;await server?.close();}

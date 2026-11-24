@@ -7,6 +7,7 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {z} from 'zod';
 import {Broker,type Entry} from './broker.js';
+import {ExecutionQueue} from './execution-queue.js';
 import {executeIsolated as execute} from './isolated.js';
 import {Management} from './management.js';
 import {transpile} from './types.js';
@@ -31,6 +32,11 @@ await refresh();
 let refreshing=false;
 const interval=setInterval(()=>{if(refreshing)return;refreshing=true;void refresh().catch(()=>{broker.replace([]);console.error(JSON.stringify({event:'refresh_failed'}));}).finally(()=>refreshing=false);},60000);interval.unref();
 const wrap=(v:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(v)}]});
+const executionQueue=new ExecutionQueue(
+  z.coerce.number().int().min(1).max(16).parse(process.env.EXECUTION_CONCURRENCY??4),
+  z.coerce.number().int().min(0).max(128).parse(process.env.EXECUTION_QUEUE_SIZE??8),
+  z.coerce.number().int().min(100).max(15000).parse(process.env.EXECUTION_QUEUE_WAIT_MS??5000),
+);
 let active=0;
 const http=createServer(async(req,res)=>{
   const requestId=randomUUID();
@@ -40,7 +46,7 @@ const http=createServer(async(req,res)=>{
   if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
   if(req.url==='/admin'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"}).end(adminPage);return;}
   if(!['/mcp','/admin/catalog','/admin/state'].includes(req.url??'')||(req.url==='/mcp'?req.method!=='POST':req.url==='/admin/state'?!['GET','PUT'].includes(req.method??''):req.method!=='GET')){res.writeHead(405).end();return;}
-  if(active>=4){res.writeHead(429).end();return;}active++;
+  if(active>=32){res.writeHead(429).end();return;}active++;
   let server:McpServer|undefined;
   try{
     const principal=await auth.authenticate(req.headers.authorization??'');
@@ -60,12 +66,15 @@ const http=createServer(async(req,res)=>{
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,id=>allowed(id))));
     server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{if(!allowed(id))throw Error('Unknown or denied tool');return wrap(broker.describe(id));});
-    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>{
+    const connection=new AbortController();
+    res.once('close',()=>connection.abort());
+    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language},{signal:requestSignal})=>{
       if(!can('execute')){
         management.record({requestId,subject:principal.id,id:'',status:'denied',durationMs:0});
         throw Error('Execution denied');
       }
-      return wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{
+      const executionSignal=AbortSignal.any([requestSignal,connection.signal]);
+      return wrap(await executionQueue.run(executionSignal,()=>execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{
         if(!allowed(id,'execute')){
           management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});
           throw Error('Unknown or denied tool');
@@ -80,7 +89,7 @@ const http=createServer(async(req,res)=>{
           management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
           throw error;
         }
-      }}));
+      }},{signal:executionSignal})));
     });
     await server.connect(transport);await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
   }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}

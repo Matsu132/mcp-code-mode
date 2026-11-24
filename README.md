@@ -29,7 +29,7 @@ const id: string = "demo.list_items";
 const result = await mcp.call(id, {});
 return result.content;
 ```
-Describe generates conservative declarations from input JSON Schema; unsupported constructs map to unknown. The catalog refreshes every minute and clears on refresh failure. Calls are explicitly authorized per subject. Limits: 20 calls per execution, 15-second target deadline, 32 MiB QuickJS heap, 4 concurrent HTTP requests. No transactional semantics.
+Describe generates conservative declarations from input JSON Schema; unsupported constructs map to unknown. The catalog refreshes every minute and clears on refresh failure. Calls are explicitly authorized per subject. Limits: 20 calls per execution, 15-second target deadline, 32 MiB QuickJS heap, 4 concurrent executions (default) and 32 concurrent HTTP requests. No transactional semantics.
 
 ## Docker
 Build with docker build -t mcp-code-mode . and run with an env file and read-only config mount. Publish only on localhost (127.0.0.1:3000:3000). Set memory/CPU limits, read-only root filesystem and no-new-privileges. Never mount Docker socket or credentials into the sandbox.
@@ -69,3 +69,12 @@ for recovery. Their upstream tool allowlists still apply. Subjects with
 no assignment retain their previous permissions. Removing an assignment
 restores those permissions. Disable the assignment to suspend an existing
 OAuth subject at the Gateway.
+
+### Execution limits
+
+`EXECUTION_CONCURRENCY` defaults to 4, `EXECUTION_QUEUE_SIZE` to 8, and
+`EXECUTION_QUEUE_WAIT_MS` to 5000. A full queue or expired queue wait
+returns an MCP tool error. Closing the HTTP connection or cancelling the
+MCP request stops queued execution or terminates the worker process and
+aborts pending upstream calls. Upstream side effects may already have
+occurred when cancellation is received.

@@ -1,9 +1,43 @@
+import {z} from 'zod';
 import {execute} from './sandbox.js';
-let seq=0;let started=false;
-const pending=new Map<number,{resolve:(s:string)=>void;reject:(e:Error)=>void}>();
-process.on('message',(raw:unknown)=>{
- const m=raw as {type:string;code?:string;timeout?:number;seq?:number;result?:string;error?:boolean};
- if(m.type==='reply'&&typeof m.seq==='number'){const p=pending.get(m.seq);pending.delete(m.seq);if(p){if(m.error)p.reject(Error('Denied'));else p.resolve(m.result??'null');}return;}
- if(m.type!=='start'||started||typeof m.code!=='string')return;started=true;
- void execute(m.code,{call:(id,args)=>new Promise<string>((resolve,reject)=>{const n=++seq;pending.set(n,{resolve,reject});process.send?.({type:'call',seq:n,id,args});})},{timeoutMs:m.timeout}).then(value=>process.send?.({type:'result',value}),()=>process.send?.({type:'error'}));
+
+const sequence = z.number().int().min(1).max(20);
+const message = z.union([
+  z.strictObject({type:z.literal('start'),code:z.string().max(32768),timeout:z.number().int().min(1).max(15000)}),
+  z.strictObject({type:z.literal('reply'),seq:sequence,result:z.string().max(262144)}),
+  z.strictObject({type:z.literal('reply'),seq:sequence,error:z.literal(true)}),
+]);
+
+let seq = 0;
+let started = false;
+const pending = new Map<number,{resolve:(result:string)=>void;reject:(error:Error)=>void}>();
+process.on('message', (raw:unknown) => {
+  const parsed = message.safeParse(raw);
+  if (!parsed.success) return process.exit(1);
+  const item = parsed.data;
+  if (item.type==='reply') {
+    const call = pending.get(item.seq);
+    if (!call) return process.exit(1);
+    pending.delete(item.seq);
+    if ('error' in item) call.reject(Error('Denied'));
+    else call.resolve(item.result);
+    return;
+  }
+  if (started) return process.exit(1);
+  started = true;
+  void execute(item.code,{
+    call:(id,args) => new Promise<string>((resolve,reject) => {
+      const n = ++seq;
+      pending.set(n,{resolve,reject});
+      process.send?.({type:'call',seq:n,id,args}, error => {
+        if (error) {
+          pending.delete(n);
+          reject(Error('Sandbox IPC failed'));
+        }
+      });
+    }),
+  },{timeoutMs:item.timeout}).then(
+    value => process.send?.({type:'result',value}),
+    () => process.send?.({type:'error'}),
+  );
 });

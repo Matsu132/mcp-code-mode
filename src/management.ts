@@ -10,6 +10,7 @@ const policy = z.object({
   roles:z.array(customRole).max(100),
   assignments:z.array(roleAssignment).max(1000),
 }).strict();
+const savedPolicy = policy.extend({roles:policy.shape.roles.default([]),assignments:policy.shape.assignments.default([])});
 const updatePolicy = policy.partial().refine(value => Object.values(value).some(v => v !== undefined));
 type Policy = z.infer<typeof policy>;
 
@@ -28,7 +29,7 @@ export class Management {
   static async open(path:string) {
     let state:Policy = {rules:[],roles:[],assignments:[]};
     try {
-      state = policy.parse({...state,...JSON.parse(await readFile(path,'utf8'))});
+      state = savedPolicy.parse(JSON.parse(await readFile(path,'utf8')));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }

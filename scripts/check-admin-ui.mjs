@@ -98,6 +98,7 @@ try {
   await page.getByText('inventory.item_50',{exact:true}).waitFor();
   await page.getByLabel('Filter').fill('item_49');
   await page.getByRole('button',{name:'Search',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'1–1 of 1 tools'}).waitFor();
   await page.getByText('inventory.item_49',{exact:true}).waitFor();
   assert.equal(await page.getByText('inventory.item_50',{exact:true}).count(),0);
   await page.goto(admin);

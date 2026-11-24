@@ -3,3 +3,5 @@ dist
 .git
 .env*
 config.json
+state.json*
+*.audit.sqlite*

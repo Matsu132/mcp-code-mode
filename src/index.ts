@@ -23,7 +23,7 @@ for(const c of config){
   const upstreamToken=c.tokenEnv?process.env[c.tokenEnv]:undefined;
   if(c.tokenEnv&&!upstreamToken)throw Error('Missing upstream token');
   const client=new Client({name:'mcp-code-mode',version:'0.1.0'});
-  await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:upstreamToken?{Authorization:'Bearer '+upstreamToken}:{}}}));
+  await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{redirect:'error',headers:upstreamToken?{Authorization:'Bearer '+upstreamToken}:{}}}));
   clients.push({c,client});
 }
 async function refresh(){const entries:Entry[]=[];for(const {c,client} of clients){let cursor:string|undefined;let pages=0;do{if(++pages>100)throw Error('Too many pages');const page=await client.listTools({cursor}, {timeout:10000});for(const t of page.tools)if(c.allow.includes(t.name))entries.push({id:c.id+'.'+t.name,name:t.name,description:t.description??'',inputSchema:t.inputSchema,client});cursor=page.nextCursor;}while(cursor);}broker.replace(entries);}
@@ -51,12 +51,12 @@ const http=createServer(async(req,res)=>{
     if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:broker.search('',allowed)}));return;}
     const chunks:Buffer[]=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>65536){res.writeHead(413).end();return;}chunks.push(chunk);}
-    if(req.url==='/admin/state'){await management.update(JSON.parse(Buffer.concat(chunks).toString()));res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(management.view()));return;}
+    if(req.url==='/admin/state'){await management.update(JSON.parse(Buffer.concat(chunks).toString()));management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:0,kind:'policy_update'});res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(management.view()));return;}
     server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     server.tool('search','Search allowed upstream tools',{query:z.string().max(200)},async({query})=>wrap(broker.search(query,allowed)));
     server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>{if(!allowed(id))throw Error('Unknown or denied tool');return wrap(broker.describe(id));});
-    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id))throw Error('Unknown or denied tool');const start=Date.now();try{const result=await broker.call(id,args,signal);management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});return result;}catch(e){management.record({requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start});throw e;}}})));
+    server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language})=>wrap(await execute(language==='typescript'?transpile(code):code,{call:async(id,args,signal)=>{if(!allowed(id)){management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});throw Error('Unknown or denied tool');}const start=Date.now();try{const result=await broker.call(id,args,signal);management.record({requestId,subject:principal.id,id,status:'success',durationMs:Date.now()-start});return result;}catch(e){management.record({requestId,subject:principal.id,id,status:'failed',durationMs:Date.now()-start});throw e;}}})));
     await server.connect(transport);await transport.handleRequest(req,res,JSON.parse(Buffer.concat(chunks).toString()));
   }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}
   finally{active--;await server?.close();}

@@ -5,3 +5,4 @@ config.json
 
 state.json
 state.json.*
+*.audit.sqlite*

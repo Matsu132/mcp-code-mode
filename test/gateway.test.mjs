@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {once} from 'node:events';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -91,4 +91,25 @@ test('HTTP gateway connects to MCP, executes allowed calls and persists administ
   assert.deepEqual(audit.map(({kind,status}) => [kind,status]),[
     ['tool_call','denied'],['policy_update','success'],['tool_call','success'],
   ]);
+
+  const upstreams = new URL('/admin/upstreams',gateway);
+  const found = await fetch(upstreams,{headers});
+  assert.equal(found.status,200);
+  const [server] = await found.json();
+  assert.equal(server.status,'ready');
+  assert.deepEqual(server.tools,['count']);
+  const draft = {id:server.id,url:server.url,tokenEnv:server.tokenEnv,allow:server.allow,enabled:true};
+  const jsonHeaders = {...headers,'Content-Type':'application/json'};
+  const tested = await fetch(new URL('/admin/upstreams/test',gateway),{
+    method:'POST',headers:jsonHeaders,body:JSON.stringify(draft),
+  });
+  assert.deepEqual(await tested.json(),{status:'ready',tools:['count']});
+  const updatedUpstreams = await fetch(upstreams,{method:'PUT',headers:jsonHeaders,body:JSON.stringify([{...draft,enabled:false}])});
+  assert.equal(updatedUpstreams.status,200);
+  const [disabled] = await updatedUpstreams.json();
+  assert.equal(disabled.status,'disabled');
+  assert.deepEqual(disabled.tools,[]);
+  const persisted = JSON.parse(await readFile(join(dir,'state.json.servers.json'),'utf8'));
+  assert.deepEqual(persisted,[{...draft,enabled:false}]);
+
 });

@@ -116,8 +116,20 @@ try {
   await page.getByText('success',{exact:true}).waitFor();
   await page.getByLabel('Administrator access token').blur();
   if (screenshots) await page.screenshot({path:join(screenshots,'admin-policy-audit.png'),fullPage:true});
+  await page.goto(admin+'/servers');
+  await page.getByLabel('Administrator access token').fill(token);
+  await page.getByRole('button',{name:'保存済み設定を読み込む'}).click();
+  await page.getByText('接続済み',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'接続テスト',exact:true}).click();
+  await page.getByText('接続テストに成功しました。',{exact:true}).waitFor();
+  if (screenshots) await page.screenshot({path:join(screenshots,'admin-servers.png'),fullPage:true});
+  await page.getByRole('checkbox',{name:'有効',exact:true}).uncheck();
+  await page.getByRole('button',{name:'保存',exact:true}).click();
+  await page.getByText('接続設定を保存しました。',{exact:true}).waitFor();
+  const registry = await fetch(base+'/admin/upstreams',{headers:{Authorization:'Bearer '+token}});
+  assert.equal((await registry.json())[0].enabled,false);
   assert.deepEqual(pageErrors,[]);
-  console.log('Browser smoke check passed: invalid authentication, catalog, token clearing, dark-mode toggle, mobile navigation, policy save and reload, audit log.');
+  console.log('Browser smoke check passed: invalid authentication, catalog, token clearing, dark-mode toggle, mobile navigation, policy save and reload, audit log, upstream connection test, and persisted upstream settings.');
 } finally {
   await browser?.close();
   const exits = children.filter(p=>p.exitCode===null&&p.signalCode===null).map(p=>{

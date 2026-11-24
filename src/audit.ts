@@ -7,7 +7,7 @@ export type AuditEvent = {
   id: string;
   status: 'success' | 'failed' | 'denied' | 'timeout';
   durationMs: number;
-  kind?: 'tool_call' | 'policy_update';
+  kind?: 'tool_call' | 'policy_update' | 'server_update';
 };
 
 export class AuditLog {

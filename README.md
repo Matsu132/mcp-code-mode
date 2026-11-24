@@ -20,10 +20,10 @@ Describe generates conservative declarations from input JSON Schema; unsupported
 Build with docker build -t mcp-code-mode . and run with an env file and read-only config mount. Publish only on localhost (127.0.0.1:3000:3000). Set memory/CPU limits, read-only root filesystem and no-new-privileges. Never mount Docker socket or credentials into the sandbox.
 
 ## Tests
-npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run benchmark measures serialized catalog bytes, not tokens; optional JSON catalog file can be passed as an argument.
+npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run benchmark measures serialized JSON tokens using cl100k_base and o200k_base; optional JSON catalog file can be passed as an argument.
 
 ## 日本語
-複数MCPを3ツールに集約する実験版です。TypeScript入力、検索、スキーマ型生成、定期カタログ更新、外部OAuth発行元のJWT検証とユーザー別許可リストに対応します。ChatGPT等との実機接続は未検証です。管理UI、ロックファイル、実トークン計測、上流OAuth委譲と独立した安全性検証は今後の課題です。公開運用前に docs/SECURITY.md を確認してください。
+複数MCPを3ツールに集約する実験版です。TypeScript入力、検索、スキーマ型生成、定期カタログ更新、外部OAuth発行元のJWT検証とユーザー別許可リストに対応します。ChatGPT等との実機接続は未検証です。ロックファイル、上流OAuth委譲と独立した安全性検証は今後の課題です。公開運用前に docs/SECURITY.md を確認してください。
 
 ## References
 - https://modelcontextprotocol.io/specification/
@@ -31,3 +31,6 @@ npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run
 - https://github.com/panva/jose
 - https://github.com/justjake/quickjs-emscripten
 - https://www.anthropic.com/engineering/code-execution-with-mcp
+
+## Catalog UI
+Open `/admin` and enter a valid access token to inspect the authorized catalog. The token is not persisted. This is a read-only catalog viewer, not a configuration editor. Synthetic benchmark excludes protocol overhead.

@@ -1,13 +1,14 @@
 import { getQuickJS } from 'quickjs-emscripten';
 import type { Broker } from './broker.js';
-export async function execute(code: string, broker: Pick<Broker,'call'>): Promise<unknown> {
+export async function execute(code: string, broker: Pick<Broker,'call'>, limits: {timeoutMs?:number} = {}): Promise<unknown> {
   if (Buffer.byteLength(code)>32768) throw new Error('Code too large');
   const q = await getQuickJS(); const runtime = q.newRuntime();
   runtime.setMemoryLimit(32*1024*1024); runtime.setMaxStackSize(512*1024);
-  const deadline = Date.now()+15000;
+  const timeoutMs=Math.min(15000,Math.max(1,limits.timeoutMs??15000));
+  const deadline = Date.now()+timeoutMs;
   runtime.setInterruptHandler(()=>Date.now()>deadline);
   const vm = runtime.newContext(); const controller = new AbortController();
-  const timer = setTimeout(()=>controller.abort(),15000);
+  const timer = setTimeout(()=>controller.abort(),timeoutMs);
   const pending = new Set<Promise<void>>(); let calls=0;
   try {
     const call = vm.newFunction('call', (id,args)=>{
@@ -15,7 +16,9 @@ export async function execute(code: string, broker: Pick<Broker,'call'>): Promis
       const task = (async()=>{
         try {
           if (++calls>20 || controller.signal.aborted) throw new Error('Call budget exceeded');
-          const result = await broker.call(vm.getString(id),JSON.parse(vm.getString(args)),controller.signal);
+          const toolId=vm.getString(id), raw=vm.getString(args);
+          if(Buffer.byteLength(toolId)>300||Buffer.byteLength(raw)>65536)throw Error('Input budget exceeded');
+          const result = await broker.call(toolId,JSON.parse(raw),controller.signal);
           if (!controller.signal.aborted) { const h=vm.newString(result); deferred.resolve(h); h.dispose(); }
         } catch { if (!controller.signal.aborted) { const h=vm.newString('Tool call failed or denied'); deferred.reject(h); h.dispose(); } }
       })();

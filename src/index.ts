@@ -10,10 +10,11 @@ import {Broker,type Entry} from './broker.js';
 import {execute} from './sandbox.js';
 import {transpile} from './types.js';
 import {createAuth,permitted} from './auth.js';
+import {adminPage} from './admin.js';
 const config=z.array(z.object({id:z.string().regex(/^[a-zA-Z0-9_-]+$/),url:z.string().url(),tokenEnv:z.string().optional(),allow:z.array(z.string())})).parse(JSON.parse(await readFile(process.env.CONFIG_PATH??'config.json','utf8')));
 const auth=createAuth(process.env);
 const broker=new Broker();
-const clients=[];
+const clients: {c:(typeof config)[number];client:Client}[]=[];
 for(const c of config){
   const url=new URL(c.url);
   if(url.username||url.password||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname))))throw Error('Trusted HTTPS URL required');
@@ -35,13 +36,15 @@ const http=createServer(async(req,res)=>{
   if(req.headers.host!==allowedHost){res.writeHead(403).end();return;}
   if(req.headers.origin&&req.headers.origin!==process.env.ALLOWED_ORIGIN){res.writeHead(403).end();return;}
   if(req.method==='GET'&&auth.metadata&&['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'].includes(req.url??'')){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.metadata));return;}
-  if(req.url!=='/mcp'||req.method!=='POST'){res.writeHead(405).end();return;}
+  if(req.url==='/admin'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"}).end(adminPage);return;}
+  if(!['/mcp','/admin/catalog'].includes(req.url??'')||(req.url==='/mcp'?req.method!=='POST':req.method!=='GET')){res.writeHead(405).end();return;}
   if(active>=4){res.writeHead(429).end();return;}active++;
   let server:McpServer|undefined;
   try{
     const principal=await auth.authenticate(req.headers.authorization??'');
     if(!principal){const challenge=auth.metadata?'Bearer resource_metadata="'+new URL('/.well-known/oauth-protected-resource/mcp',auth.metadata.resource).href+'"':'Bearer';res.writeHead(401,{'WWW-Authenticate':challenge}).end();return;}
     const allowed=(id:string)=>permitted(principal,id);
+    if(req.url==='/admin/catalog'){res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'}).end(JSON.stringify({subject:principal.id,tools:broker.search('',allowed)}));return;}
     const chunks:Buffer[]=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>65536){res.writeHead(413).end();return;}chunks.push(chunk);}
     server=new McpServer({name:'mcp-code-mode',version:'0.1.0'});

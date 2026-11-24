@@ -40,9 +40,11 @@ async function ready(url) {
   throw Error('Service did not start');
 }
 
+const laterTools=Array.from({length:51},(_,i)=>'item_'+String(i).padStart(2,'0'));
 const upstream = createServer(async (req,res) => {
   const mcp = new McpServer({name:'inventory-fixture',version:'1.0.0'});
   mcp.tool('count','Read the number of inventory items',{}, async () => ({content:[{type:'text',text:'3'}]}));
+  for(const name of laterTools)mcp.tool(name,{},async()=>({content:[]}));
   const transport = new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
   try {
     await mcp.connect(transport);
@@ -56,7 +58,7 @@ try {
   const upstreamUrl=`http://127.0.0.1:${upstreamPort}/mcp`;
   const delegatedUrl='https://resource.fixture.test/mcp';
   await writeFile(config,JSON.stringify([
-    {id:'inventory',url:upstreamUrl,allow:['count']},
+    {id:'inventory',url:upstreamUrl,allow:['count',...laterTools]},
     {id:'oauth-fixture',url:delegatedUrl,allow:['count'],enabled:false},
   ]));
   const gatewayPort = await freePort();
@@ -75,10 +77,29 @@ try {
   await cp(join(project,'apps/admin/.next/static'),join(standalone,'.next/static'),{recursive:true});
   processes(['server.js'],standalone,{PORT:adminPort,HOSTNAME:'127.0.0.1',GATEWAY_URL:base});
   await Promise.all([ready(base+'/admin/state'),ready(admin)]);
+  for(const [path,method,limit] of [['/api/settings','PUT',65536],['/api/state','PUT',65536],['/api/upstreams?action=test','POST',65536],['/api/oauth','POST',1024]]){
+    const body=new ReadableStream({start(controller){
+      controller.enqueue(new Uint8Array(limit));
+      controller.enqueue(new Uint8Array(1));
+      controller.close();
+    }});
+    const response=await fetch(admin+path,{method,headers:{Authorization:'Bearer fixture-invalid'},body,duplex:'half'});
+    assert.equal(response.status,413,path);
+  }
   browser = await chromium.launch();
   const page = await browser.newPage({viewport:{width:1440,height:900}});
   const pageErrors = [];
   page.on('pageerror', err => pageErrors.push(err.message));
+  await page.goto(base+'/admin');
+  await page.getByLabel('Access token').fill(token);
+  await page.getByRole('button',{name:'Load catalog'}).click();
+  await page.getByText('inventory.count',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Next',exact:true}).click();
+  await page.getByText('inventory.item_50',{exact:true}).waitFor();
+  await page.getByLabel('Filter').fill('item_49');
+  await page.getByRole('button',{name:'Search',exact:true}).click();
+  await page.getByText('inventory.item_49',{exact:true}).waitFor();
+  assert.equal(await page.getByText('inventory.item_50',{exact:true}).count(),0);
   await page.goto(admin);
   await page.getByLabel('Access token').fill('invalid-token');
   await page.getByRole('button',{name:'Load catalog'}).click();
@@ -94,6 +115,26 @@ try {
     await mkdir(screenshots,{recursive:true});
     await page.screenshot({path:join(screenshots,'admin-dashboard.png'),fullPage:true});
   }
+  const requestSeen=Promise.withResolvers();
+  const releasePage=Promise.withResolvers();
+  const routeFinished=Promise.withResolvers();
+  const delayPage=async route=>{
+    if(new URL(route.request().url()).searchParams.get('offset')!=='15')return route.continue();
+    requestSeen.resolve();
+    await releasePage.promise;
+    try{await route.fulfill({json:{subject:'stale',tools:[],total:0}});}catch{}
+    finally{routeFinished.resolve();}
+  };
+  await page.route('**/api/catalog?*',delayPage);
+  await page.getByRole('button',{name:'Go to next page'}).click();
+  await requestSeen.promise;
+  await page.getByRole('button',{name:'Clear',exact:true}).click();
+  releasePage.resolve();
+  await routeFinished.promise;
+  await page.getByText('Authenticate to view tools',{exact:true}).waitFor();
+  assert.equal(await page.getByText('inventory.count',{exact:true}).count(),0);
+  await page.unroute('**/api/catalog?*',delayPage);
+
   await page.getByRole('button',{name:'Toggle color mode'}).click();
   await page.setViewportSize({width:400,height:850});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),true);
@@ -164,7 +205,14 @@ try {
   assert.equal(shared.enabled,false);
   assert.equal(delegated.enabled,true);
 
+  const earlier=await page.request.post(admin+'/api/oauth',{
+    headers:{Authorization:'Bearer '+token},data:{action:'connect',id:'oauth-fixture'},
+  });
+  assert.equal(earlier.status(),200);
+  const oldState=new URL((await earlier.json()).authorizationUrl).searchParams.get('state');
   await page.route(/^https:\/\/authorization\.fixture\.test\/authorize\?/,async route=>{
+    const oldCallback=await page.request.get(admin+'/api/oauth/callback?'+new URLSearchParams({state:oldState,code:'alice'}),{maxRedirects:0});
+    assert.equal(oldCallback.headers().location,'/oauth-connections?result=failed');
     const authorization=new URL(route.request().url());
     assert.equal(authorization.searchParams.get('code_challenge_method'),'S256');
     const callback=new URL(authorization.searchParams.get('redirect_uri'));

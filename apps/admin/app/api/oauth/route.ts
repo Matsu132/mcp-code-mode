@@ -1,8 +1,10 @@
+import {BodyTooLarge,readBody} from '../_request-body';
+import {browserCookieName} from './browser-cookie';
 import {randomBytes} from 'node:crypto';
 import {NextRequest,NextResponse} from 'next/server';
 
 export const dynamic = 'force-dynamic';
-const browserCookie = 'mcp_oauth_browser';
+
 
 async function proxy(req:NextRequest) {
   const authorization = req.headers.get('authorization');
@@ -14,8 +16,7 @@ async function proxy(req:NextRequest) {
     let browser:string|undefined;
     let body:string|undefined;
     if (req.method==='POST') {
-      const raw = await req.text();
-      if (Buffer.byteLength(raw)>1024) return NextResponse.json({error:'Too large'},{status:413});
+      const raw = await readBody(req,1024);
       const {action,id} = JSON.parse(raw) as {action:unknown;id:unknown};
       if (action!=='connect' && action!=='disconnect') return NextResponse.json({error:'Unknown OAuth action'},{status:400});
       if (action==='connect') browser = randomBytes(32).toString('base64url');
@@ -25,17 +26,22 @@ async function proxy(req:NextRequest) {
       method:req.method,body,headers:{Authorization:authorization,'Content-Type':'application/json'},
       cache:'no-store',redirect:'error',signal:AbortSignal.timeout(30000),
     });
-    const result = NextResponse.json(upstream.ok?await upstream.json():{error:'OAuth request failed'},{
+    const data=upstream.ok?await upstream.json():{error:'OAuth request failed'};
+    const state=browser&&upstream.ok?new URL(data.authorizationUrl).searchParams.get('state'):null;
+    const cookie=browser&&state?browserCookieName(state):undefined;
+    if(browser&&!cookie&&upstream.ok)throw Error('Invalid OAuth state');
+    const result = NextResponse.json(data,{
       status:upstream.status,headers:{'Cache-Control':'no-store'},
     });
-    if (upstream.ok && browser) {
-      result.cookies.set(browserCookie,browser,{
+    if (cookie && browser) {
+      result.cookies.set(cookie,browser,{
         httpOnly:true,sameSite:'lax',secure:!['127.0.0.1','localhost'].includes(req.nextUrl.hostname),
         path:'/api/oauth/callback',maxAge:600,
       });
     }
     return result;
-  } catch {
+  } catch(error) {
+    if(error instanceof BodyTooLarge)return NextResponse.json({error:'Too large'},{status:413});
     return NextResponse.json({error:'Gateway unavailable'},{status:502});
   }
 }

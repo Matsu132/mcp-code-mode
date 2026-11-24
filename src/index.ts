@@ -10,7 +10,7 @@ import {DelegatedOAuth} from './upstream-oauth.js';
 import {defaults,executionSettings} from './execution-settings.js';
 import {ExecutionQueue} from './execution-queue.js';
 import {executeIsolated as execute} from './isolated.js';
-import {Management} from './management.js';
+import {Management,PolicyConflict} from './management.js';
 import {createAuth,permitted,type Principal} from './auth.js';
 import {adminPage} from './admin.js';
 const statePath=process.env.STATE_PATH??'state.json';
@@ -54,6 +54,7 @@ async function readBody(req:AsyncIterable<Buffer>) {
 }
 const allowedHost=process.env.ALLOWED_HOST??'127.0.0.1:'+String(process.env.PORT??3000);
 const allowedHosts=new Set([allowedHost,...(process.env.ADDITIONAL_ALLOWED_HOSTS??'').split(',').map(host=>host.trim()).filter(Boolean)]);
+class ExecutionDenied extends Error {}
 let active=0;
 const http=createServer(async(req,res)=>{
   const requestId=randomUUID();
@@ -102,13 +103,24 @@ const http=createServer(async(req,res)=>{
     const principal=await auth.authenticate(req.headers.authorization??'');
     if(!principal){const challenge=auth.metadata?'Bearer resource_metadata="'+new URL('/.well-known/oauth-protected-resource/mcp',auth.metadata.resource).href+'"':'Bearer';res.writeHead(401,{'WWW-Authenticate':challenge}).end();return;}
     if(management.roles.disabled(principal.id,principal.admin===true)){res.writeHead(403).end();return;}
-    const permittedTool=(id:string,operation:'read'|'execute'='read')=>allowed(principal,id,operation);
+    const currentPrincipal=()=>auth.principalFor(principal.id);
+    const permittedTool=(id:string,operation:'read'|'execute'='read')=>{
+      const current=currentPrincipal();
+      return !!current&&allowed(current,id,operation);
+    };
+    const canExecute=()=>{
+      const current=currentPrincipal();
+      return !!current&&can(current,'execute');
+    };
     const openSession=(id:string)=>{
       const existing=sessions.get(id);
       if(existing)return existing;
       const session=delegatedConnections.run(connection.signal,async()=>{
+        const before=currentPrincipal();
+        if(!before||!mayConnect(before,id))return undefined;
         const token=await delegated?.accessToken(principal.id,id);
-        if(!token||!mayConnect(principal,id))return undefined;
+        const current=currentPrincipal();
+        if(!token||!current||!mayConnect(current,id))return undefined;
         return upstreams.openDelegated(id,token);
       }).catch(()=>undefined);
       sessions.set(id,session);
@@ -175,6 +187,10 @@ const http=createServer(async(req,res)=>{
     }
     const body=await readBody(req);
     if(body===undefined){res.writeHead(413).end();return;}
+    if(path.startsWith('/admin/')){
+      const current=currentPrincipal();
+      if(!current||!can(current,'manage')){res.writeHead(403).end();return;}
+    }
     if(path==='/admin/settings'){
       const updated=executionSettings.parse(body);
       await management.update({execution:updated});
@@ -184,8 +200,8 @@ const http=createServer(async(req,res)=>{
       json(limits);return;
     }
     if(path==='/admin/state'){
-      const settings=z.strictObject({rules:z.unknown().optional(),roles:z.unknown().optional(),assignments:z.unknown().optional()}).parse(body);
-      await management.update(settings);
+      const {revision,...settings}=z.strictObject({revision:z.uuid(),rules:z.unknown().optional(),roles:z.unknown().optional(),assignments:z.unknown().optional()}).parse(body);
+      await management.update(settings,revision);
       management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:0,kind:'policy_update'});
       json(management.view());return;
     }
@@ -212,13 +228,15 @@ const http=createServer(async(req,res)=>{
     server.tool('describe','Get schema and TypeScript declaration',{id:z.string().max(300)},async({id})=>wrap(await describe(id)));
     server.tool('execute','Execute JavaScript or TypeScript async body. Use mcp.call(id,args); return required data.',{code:z.string().max(32768),language:z.enum(['javascript','typescript']).optional()},async({code,language},{signal:requestSignal})=>{
       const started=Date.now();
-      if(!can(principal,'execute')){
+      if(!canExecute()){
         management.record({requestId,subject:principal.id,id:'',status:'denied',durationMs:0,kind:'execution'});
         throw Error('Execution denied');
       }
       const executionSignal=AbortSignal.any([requestSignal,connection.signal]);
       try {
-        const result=await executionQueue.run(executionSignal,()=>execute(code,{call:async(id,args,signal)=>{
+        const result=await executionQueue.run(executionSignal,()=>{
+          if(!canExecute())throw new ExecutionDenied('Execution denied');
+          return execute(code,{call:async(id,args,signal)=>{
         if(!permittedTool(id,'execute')){
           management.record({requestId,subject:principal.id,id,status:'denied',durationMs:0});
           throw Error('Unknown or denied tool');
@@ -229,32 +247,34 @@ const http=createServer(async(req,res)=>{
           const [upstreamId]=id.split('.',1);
           if(delegated?.reserves(upstreamId)){
             const session=await openSession(upstreamId);
-            if(!delegatedAvailable(id)||!permittedTool(id,'execute'))throw Error('Unknown or denied tool');
+            if(!delegatedAvailable(id))throw Error('Unknown or denied tool');
             target=new Broker();
             target.replace(session?.entries??[]);
           }
+          if(!permittedTool(id,'execute'))throw new ExecutionDenied('Unknown or denied tool');
           const result=await target.call(id,args,signal);
           const status=(JSON.parse(result) as {isError?:boolean}).isError?'failed':'success';
           management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
           return result;
         }catch(error){
-          const status=signal.aborted
+          const status=error instanceof ExecutionDenied?'denied':signal.aborted
             ? (signal.reason instanceof Error&&signal.reason.message.includes('deadline')?'timeout':'cancelled')
             : 'failed';
           management.record({requestId,subject:principal.id,id,status,durationMs:Date.now()-start});
           throw error;
         }
-        }},{signal:executionSignal,timeoutMs:limits.timeoutMs,language}));
+        }},{signal:executionSignal,timeoutMs:limits.timeoutMs,language});
+        });
         management.record({requestId,subject:principal.id,id:'',status:'success',durationMs:Date.now()-started,kind:'execution'});
         return wrap(result);
       } catch (error) {
-        const status=executionSignal.aborted?'cancelled':error instanceof Error&&error.message.includes('deadline')?'timeout':'failed';
+        const status=error instanceof ExecutionDenied?'denied':executionSignal.aborted?'cancelled':error instanceof Error&&error.message.includes('deadline')?'timeout':'failed';
         management.record({requestId,subject:principal.id,id:'',status,durationMs:Date.now()-started,kind:'execution'});
         throw error;
       }
     });
     await server.connect(transport);await transport.handleRequest(req,res,body);
-  }catch{if(!res.headersSent)res.writeHead(400).end();else res.end();}
+  }catch(error){if(!res.headersSent)res.writeHead(error instanceof PolicyConflict?409:400).end();else res.end();}
   finally{
     connection.abort();
     try {

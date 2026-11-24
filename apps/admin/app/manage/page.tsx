@@ -11,12 +11,12 @@ type Rule = {subject:string;allow:string[]};
 type Role = {id:string;read:boolean;execute:boolean;manage:boolean;servers:string[];tools:string[]};
 type Assignment = {subject:string;role:string;disabled:boolean;enrollmentAllow?:string[]};
 type Audit = {sequence:number;requestId:string;startedAt:string;time:string;subject:string;serverId:string|null;id:string;status:string;durationMs:number;kind:string};
-type State = {rules:Rule[];roles:Role[];assignments:Assignment[]};
+type State = {revision:string;rules:Rule[];roles:Role[];assignments:Assignment[]};
 
 const builtins = ['admin','operator','viewer'];
 const split = (value:string) => value.split(',');
 const clean = (values:string[]) => [...new Set(values.map(value=>value.trim()).filter(Boolean))];
-const blank:State = {rules:[],roles:[],assignments:[]};
+const blank:State = {revision:'',rules:[],roles:[],assignments:[]};
 
 function replace<T>(items:T[], index:number, patch:Partial<T>) {
   return items.map((item,i) => i === index ? {...item,...patch} : item);
@@ -61,6 +61,7 @@ export default function Manage() {
     setError('');
     try {
       const payload = {
+        revision:data.revision,
         rules:data.rules.map(rule=>({subject:rule.subject.trim(),allow:clean(rule.allow)})),
         roles:data.roles.map(role=>({...role,id:role.id.trim(),servers:clean(role.servers),tools:clean(role.tools)})),
         assignments:data.assignments.map(assignment=>({
@@ -77,6 +78,7 @@ export default function Manage() {
         headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
         body:save?JSON.stringify(payload):undefined,
       });
+      if(res.status===409)throw Error('別の操作で権限設定が更新されました。「読み込み」で最新の設定を取得してから編集し直してください。');
       if (!res.ok) throw Error('管理者認証または更新に失敗しました。重複する Subject とロールIDも確認してください。');
       setData(await res.json() as State);
       setLoaded(true);

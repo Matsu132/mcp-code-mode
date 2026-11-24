@@ -1,13 +1,15 @@
+import {browserCookieName} from '../browser-cookie';
 import {NextRequest,NextResponse} from 'next/server';
 
 export const dynamic = 'force-dynamic';
-const browserCookie = 'mcp_oauth_browser';
+
 
 export async function GET(req:NextRequest) {
-  const browser = req.cookies.get(browserCookie)?.value;
   const {searchParams} = req.nextUrl;
   const state = searchParams.get('state');
   const code = searchParams.get('code');
+  const cookie=state?browserCookieName(state):undefined;
+  const browser=cookie?req.cookies.get(cookie)?.value:undefined;
   let ok = false;
   if (browser && state && code && code.length<=4096 && state.length<=100) {
     try {
@@ -24,7 +26,7 @@ export async function GET(req:NextRequest) {
   const res = new NextResponse(null,{
     status:303,headers:{Location:'/oauth-connections?result='+(ok?'connected':'failed'),'Cache-Control':'no-store','Referrer-Policy':'no-referrer'},
   });
-  res.cookies.set(browserCookie,'',{
+  if(cookie&&browser)res.cookies.set(cookie,'',{
     maxAge:0,httpOnly:true,sameSite:'lax',secure:!['127.0.0.1','localhost'].includes(req.nextUrl.hostname),
     path:'/api/oauth/callback',
   });

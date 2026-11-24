@@ -1,6 +1,6 @@
 'use client';
 
-import {useState} from 'react';
+import {useRef,useState} from 'react';
 import {
   Alert,AppBar,Box,Button,Card,CardContent,Chip,CircularProgress,Dialog,
   DialogActions,DialogContent,DialogTitle,Divider,Drawer,IconButton,List,ListItemButton,
@@ -43,45 +43,75 @@ export default function Page() {
   const [detail,setDetail] = useState<Detail|null>(null);
   const [detailBusy,setDetailBusy] = useState(false);
 
+  const catalogRequest=useRef<AbortController|null>(null);
+  const detailRequest=useRef<AbortController|null>(null);
+
+  function clearSession() {
+    catalogRequest.current?.abort();
+    detailRequest.current?.abort();
+    catalogRequest.current=null;
+    detailRequest.current=null;
+    setBusy(false);
+    setDetailBusy(false);
+    setDetail(null);
+    setCatalog(null);
+    setToken('');
+    setSessionToken('');
+    setSearch('');
+    setApplied('');
+    setPage(0);
+    setError('');
+  }
+
   async function load(credential:string, query='', index=0, authenticate=false) {
+    if(authenticate)clearSession();
+    else if(catalogRequest.current)return;
+    const request=new AbortController();
+    catalogRequest.current=request;
     setBusy(true);
     setError('');
-    if (authenticate) {
-      setCatalog(null);
-      setSessionToken('');
-      setToken('');
-    }
     try {
       const params = new URLSearchParams({q:query,limit:String(pageSize),offset:String(index*pageSize)});
       const response = await fetch('/api/catalog?'+params,{
-        headers:{Authorization:'Bearer '+credential},cache:'no-store',
+        headers:{Authorization:'Bearer '+credential},cache:'no-store',signal:request.signal,
       });
       const data = await response.json();
+      if(request.signal.aborted)return;
       if (!response.ok) throw Error(data.error??'Request failed');
       setCatalog(data as Catalog);
       setSessionToken(credential);
       setApplied(query);
       setPage(index);
     } catch (err) {
-      setError(err instanceof Error?err.message:'Request failed');
+      if(!request.signal.aborted)setError(err instanceof Error?err.message:'Request failed');
     } finally {
-      setBusy(false);
+      if(catalogRequest.current===request){
+        catalogRequest.current=null;
+        setBusy(false);
+      }
     }
   }
 
   async function inspect(id:string) {
+    if(detailRequest.current||!sessionToken)return;
+    const request=new AbortController();
+    detailRequest.current=request;
     setError('');
     setDetailBusy(true);
     try {
       const response = await fetch('/api/catalog?'+new URLSearchParams({tool:id}),{
-        headers:{Authorization:'Bearer '+sessionToken},cache:'no-store',
+        headers:{Authorization:'Bearer '+sessionToken},cache:'no-store',signal:request.signal,
       });
       if (!response.ok) throw Error('ツールのスキーマを取得できませんでした。');
-      setDetail(await response.json() as Detail);
+      const data=await response.json() as Detail;
+      if(!request.signal.aborted)setDetail(data);
     } catch (err) {
-      setError(err instanceof Error?err.message:'取得に失敗しました。');
+      if(!request.signal.aborted)setError(err instanceof Error?err.message:'取得に失敗しました。');
     } finally {
-      setDetailBusy(false);
+      if(detailRequest.current===request){
+        detailRequest.current=null;
+        setDetailBusy(false);
+      }
     }
   }
 
@@ -142,9 +172,7 @@ export default function Page() {
                   onSubmit={event=>{event.preventDefault();if(token&&!busy)void load(token,'',0,true);}}>
                   <TextField fullWidth label="Access token" type="password" autoComplete="off" value={token} onChange={e=>setToken(e.target.value)}/>
                   <Button type="submit" variant="contained" disabled={!token||busy} sx={{whiteSpace:'nowrap'}}>Load catalog</Button>
-                  <Button disabled={busy||detailBusy} onClick={()=>{
-                    setCatalog(null);setToken('');setSessionToken('');setSearch('');setApplied('');setPage(0);setError('');
-                  }}>Clear</Button>
+                  <Button onClick={clearSession}>Clear</Button>
                 </Stack>
                 {catalog&&<Alert severity="success">Subject: {catalog.subject}</Alert>}
               </Stack>
@@ -178,7 +206,7 @@ export default function Page() {
                   </TableBody>
                 </Table></TableContainer>
                 {catalog&&<TablePagination component="div" count={catalog.total} page={page} rowsPerPage={pageSize}
-                  rowsPerPageOptions={[pageSize]} onPageChange={(_,index)=>void load(sessionToken,applied,index)}/>}
+                  rowsPerPageOptions={[pageSize]} disabled={busy} onPageChange={(_,index)=>void load(sessionToken,applied,index)}/>}
               </Stack>
             </Paper>
           </Stack>

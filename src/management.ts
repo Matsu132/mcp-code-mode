@@ -16,9 +16,12 @@ const savedPolicy = policy.extend({roles:policy.shape.roles.default([]),assignme
 const updatePolicy = policy.partial().refine(value => Object.values(value).some(v => v !== undefined));
 type Policy = z.infer<typeof policy>;
 
+export class PolicyConflict extends Error {}
+
 export class Management {
   private state:Policy;
   private writing = false;
+  private revision = randomUUID();
   private rolePolicy:RolePolicy;
 
   get roles() { return this.rolePolicy; }
@@ -46,7 +49,7 @@ export class Management {
   }
 
   view() {
-    return {...this.state,audit:this.audit.recent()};
+    return {...this.state,revision:this.revision,audit:this.audit.recent()};
   }
 
   get execution() { return this.state.execution; }
@@ -55,7 +58,8 @@ export class Management {
 
   events(query:string,limit:number,offset:number) { return this.audit.page(query,limit,offset); }
 
-  async update(raw:unknown) {
+  async update(raw:unknown,revision?:string) {
+    if (revision!==undefined&&(this.writing||revision!==this.revision)) throw new PolicyConflict();
     if (this.writing) throw Error('Concurrent update');
     const patch = updatePolicy.parse(raw);
     const next = policy.parse({...this.state,...patch});
@@ -70,6 +74,7 @@ export class Management {
       await rename(tmp,this.path);
       this.state = next;
       this.rolePolicy = roles;
+      if(revision!==undefined)this.revision=randomUUID();
     } finally {
       this.writing = false;
       if (created) await rm(tmp,{force:true});

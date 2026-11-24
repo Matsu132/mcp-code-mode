@@ -78,12 +78,18 @@ test('HTTP gateway connects to MCP, executes allowed calls and persists administ
   const execute = () => call('execute',{code:"return (await mcp.call('inventory.count',{})).content[0].text;"});
   assert.equal(JSON.parse((await execute()).content[0].text),'3');
 
+  const {revision}=await (await fetch(state,{headers})).json();
   const updated = await fetch(state,{
     method:'PUT',
     headers:{...headers,'Content-Type':'application/json'},
-    body:JSON.stringify({rules:[{subject:'operator',allow:[]}]}),
+    body:JSON.stringify({revision,rules:[{subject:'operator',allow:[]}]}),
   });
   assert.equal(updated.status,200);
+  const stale = await fetch(state,{
+    method:'PUT',headers:{...headers,'Content-Type':'application/json'},
+    body:JSON.stringify({revision,rules:[]}),
+  });
+  assert.equal(stale.status,409);
   assert.equal((await execute()).isError,true);
   const response = await fetch(state,{headers});
   assert.equal(response.status,200);

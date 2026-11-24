@@ -30,11 +30,22 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
     .setIssuer(issuer).setAudience(aud).setSubject(subject).setExpirationTime('5m').sign(privateKey);
   const tokens = await Promise.all(['alice','bob','viewer','admin','unknown'].map(subject=>jwt(subject)));
   const [alice,bob,viewer,admin,unknown] = tokens;
+  const entered=Promise.withResolvers();
+  const release=Promise.withResolvers();
+  let bobReads=0;
   const upstream = createServer(async (req,res) => {
     const user = /^Bearer upstream-(alice|bob)$/.exec(req.headers.authorization??'')?.[1];
     if (!user) return res.writeHead(401).end();
     const mcp = new McpServer({name:'private-'+user,version:'1.0.0'});
-    mcp.tool(user+'_read',{},async()=>({content:[{type:'text',text:user+' private result'}]}));
+    mcp.tool(user+'_read',{},async()=>{
+      if(user==='bob')bobReads++;
+      return {content:[{type:'text',text:user+' private result'}]};
+    });
+    if(user==='bob')mcp.tool('bob_hold',{},async()=>{
+      entered.resolve();
+      await release.promise;
+      return {content:[]};
+    });
     const transport = new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
     try {
       await mcp.connect(transport);
@@ -49,14 +60,14 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
   const directory = await mkdtemp(join(tmpdir(),'mcp-delegated-http-'));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const config = join(directory,'config.json');
-  await writeFile(config,JSON.stringify([{id:'private',url:resource,allow:['alice_read','bob_read']}]));
+  await writeFile(config,JSON.stringify([{id:'private',url:resource,allow:['alice_read','bob_read','bob_hold']}]));
   const child = spawn(process.execPath,['--import','./test/fixtures/delegated-network.mjs','dist/index.js'],{
     env:{
       PORT:String(port),CONFIG_PATH:config,STATE_PATH:join(directory,'state.json'),
       FIXTURE_MCP:`http://127.0.0.1:${upstreamPort}/mcp`,FIXTURE_JWK:JSON.stringify(jwk),
       OAUTH_CONFIG:JSON.stringify({
         issuer,jwks:issuer+'/jwks',resource:audience,
-        users:['alice','bob','viewer','admin'].map(sub=>({sub,allow:['*']})),
+        users:['alice','viewer','admin'].map(sub=>({sub,allow:['*']})),
       }),
       ADMIN_SUBJECTS:'admin',
       UPSTREAM_OAUTH_CONFIG:JSON.stringify([{id:'private',url:resource,issuer:'https://authorization.fixture.test',clientId:'gateway-fixture'}]),
@@ -72,6 +83,10 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
   const headers = token => ({Authorization:'Bearer '+token,'Content-Type':'application/json'});
   const get = async (path,token) => fetch(base+path,{headers:headers(token)});
   const send = (path,token,body,method='POST') => fetch(base+path,{method,headers:headers(token),body:JSON.stringify(body)});
+  const updatePolicy=async patch=>{
+    const {revision}=await (await get('/admin/state',admin)).json();
+    return send('/admin/state',admin,{revision,...patch},'PUT');
+  };
   let ready;
   for(let attempt=0;attempt<100;attempt++){
     ready=await fetch(base+'/.well-known/oauth-protected-resource/mcp',{signal:AbortSignal.timeout(300)}).catch(()=>undefined);
@@ -84,7 +99,7 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
   assert.equal((await get('/admin/catalog',unknown)).status,401);
   assert.equal((await get('/admin/catalog',await jwt('alice','https://other.fixture.test/mcp'))).status,401);
   assert.equal((await send('/admin/state',viewer,{assignments:[]},'PUT')).status,403);
-  assert.equal((await send('/admin/state',admin,{assignments:[{subject:'viewer',role:'viewer',disabled:false}]},'PUT')).status,200);
+  assert.equal((await updatePolicy({assignments:[{subject:'viewer',role:'viewer',disabled:false}]})).status,200);
   assert.equal((await send('/admin/state',viewer,{assignments:[]},'PUT')).status,403);
 
   const connect = async (token,user) => {
@@ -96,6 +111,8 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
     const result = await send('/oauth/callback','',{browser,state:auth.searchParams.get('state'),code:user});
     assert.equal(result.status,200);
   };
+  const bobEnrollment={subject:'bob',role:'operator',disabled:false,enrollmentAllow:['private.bob_read','private.bob_hold']};
+  assert.equal((await updatePolicy({assignments:[bobEnrollment,{subject:'viewer',role:'viewer',disabled:false}]})).status,200);
   await connect(alice,'alice');
   const before = await get('/oauth/connections',bob);
   assert.equal((await before.json())[0].status,'disconnected');
@@ -122,12 +139,24 @@ test('authenticated users keep separate OAuth sessions, catalogs and tool result
   assert.equal((await send('/oauth/connections',alice,{action:'disconnect',id:'private'})).status,200);
   assert.deepEqual(await search(callAlice),[]);
   assert.deepEqual(await search(callBob),['private.bob_read']);
+  assert.equal((await send('/admin/settings',admin,{concurrency:1,queueSize:2,queueWaitMs:5000,timeoutMs:5000},'PUT')).status,200);
+  const running=callBob('execute',{code:"await mcp.call('private.bob_hold',{}); return await mcp.call('private.bob_read',{});"});
+  await entered.promise;
+  const queued=callBob('execute',{code:"return await mcp.call('private.bob_read',{});"});
+  try {
+    await delay(75);
+    assert.equal((await updatePolicy({assignments:[]})).status,200);
+  } finally { release.resolve(); }
+  const denied=await Promise.all([running,queued]);
+  assert.ok(denied.every(result=>result.isError));
+  assert.equal(bobReads,1);
+  assert.equal((await get('/admin/catalog',bob)).status,401);
   const enrolled={subject:'unknown',role:'viewer',disabled:false,enrollmentAllow:['private.alice_read']};
-  assert.equal((await send('/admin/state',admin,{assignments:[enrolled]},'PUT')).status,200);
+  assert.equal((await updatePolicy({assignments:[enrolled]})).status,200);
   assert.equal((await get('/admin/catalog',unknown)).status,200);
   assert.equal((await get('/admin/state',unknown)).status,403);
-  assert.equal((await send('/admin/state',admin,{assignments:[{...enrolled,disabled:true}]},'PUT')).status,200);
+  assert.equal((await updatePolicy({assignments:[{...enrolled,disabled:true}]})).status,200);
   assert.equal((await get('/admin/catalog',unknown)).status,403);
-  assert.equal((await send('/admin/state',admin,{assignments:[]},'PUT')).status,200);
+  assert.equal((await updatePolicy({assignments:[]})).status,200);
   assert.equal((await get('/admin/catalog',unknown)).status,401);
 });

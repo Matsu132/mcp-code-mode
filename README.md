@@ -34,3 +34,6 @@ npm test; npm run lint; npm run typecheck; npm audit --audit-level=high. npm run
 
 ## Catalog UI
 Open `/admin` and enter a valid access token to inspect the authorized catalog. The token is not persisted. This is a read-only catalog viewer, not a configuration editor. Synthetic benchmark excludes protocol overhead.
+
+## Next.js administration UI
+The separate app in `apps/admin` uses Next.js App Router, TypeScript, MUI Core and Emotion (free OSS components). Start the gateway first, then run `cd apps/admin && npm install && npm run dev`. Open http://127.0.0.1:3001. Set GATEWAY_URL on the UI server if needed; the gateway Host allowlist must match that URL. The same-origin server route proxies the access token only to the configured gateway and does not store it. Dashboard counts are limited to the visible catalog (up to 30 tools). Dark mode and responsive navigation are supported. This is a read-only admin frontend; configuration editing, role administration, upstream OAuth delegation and persistent audit dashboards are not yet implemented. Build the UI container with `docker build -t mcp-code-mode-admin apps/admin`; configure a private network and GATEWAY_URL, and publish only to localhost or a trusted TLS proxy.

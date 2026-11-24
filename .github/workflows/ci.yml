@@ -17,6 +17,9 @@ jobs:
       - run: npm test
       - run: npm audit --audit-level=high
       - run: docker build -t mcp-code-mode .
+      - run: docker compose config --quiet
+        env:
+          GATEWAY_TOKEN: ci-compose-syntax-check-placeholder
   admin:
     runs-on: ubuntu-latest
     timeout-minutes: 10

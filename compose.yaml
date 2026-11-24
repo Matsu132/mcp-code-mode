@@ -1,0 +1,32 @@
+services:
+  gateway:
+    build: .
+    environment:
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN to a random string of at least 32 characters}
+      CONFIG_PATH: /config/config.json
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - type: bind
+        source: ./config.json
+        target: /config/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - state:/data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    pids_limit: 128
+  admin:
+    build: ./apps/admin
+    network_mode: "service:gateway"
+    environment:
+      GATEWAY_URL: http://127.0.0.1:3000
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 128
+volumes:
+  state:
